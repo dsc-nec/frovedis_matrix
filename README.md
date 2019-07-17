@@ -580,6 +580,13 @@ pointer to the matrix as input and output matrix, you can use
 It is similar to SpMV case, but you need to specify the number of
 column of the multiplying rowmajor matrix.
 
+In addition, we added SpGEMM support. You can call the routine like:
+
+    auto r3 = spgemm(crs,crs);
+
+The result is also CRS matrix. 
+You can also use CCS format as the imput. In this case, the result is
+CCS format. We are now improving the performance.
 
 ## 3.4 Other sparse matrix format
 
