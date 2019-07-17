@@ -1,0 +1,18 @@
+# site definitions: modify these lines if necessary
+NLC_VERSION := $(shell ls /opt/nec/ve/nlc | sort -V -r | head -1)
+NLC_INC := /opt/nec/ve/nlc/${NLC_VERSION}/include
+NLC_LIB := /opt/nec/ve/nlc/${NLC_VERSION}/lib
+
+CXX := nc++
+AR := nar
+CXXFLAGS_COMMON := -O4 -fno-defer-inline-template-instantiation -I${NLC_INC}
+
+# if you link with libraries compiled with fortran (e.g. BLAS/LAPACK)
+LINK :=	nfort -cxxlib -static
+
+LIBS_COMMON := -L${NLC_LIB} -lasl_sequential
+
+TO_CLEAN := *.o *~
+
+.cc.o:
+	${CXX} -c ${CXXFLAGS} $< -o $@

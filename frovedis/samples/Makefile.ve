@@ -1,0 +1,25 @@
+include ../Makefile.in.ve
+
+TARGETS := saveload rowmajor crs othersparse
+
+LIBS := -L../core -lfrovedis_core -L../matrix -lfrovedis_matrix
+INCLUDES := -I../.. -I.
+
+CXXFLAGS := ${CXXFLAGS_COMMON} ${INCLUDES}
+
+all: ${TARGETS}
+
+saveload: saveload.o
+	${CXX} ${CXXFLAGS} -o saveload saveload.o ${LIBS}
+
+rowmajor: rowmajor.o
+	${CXX} ${CXXFLAGS} -o rowmajor rowmajor.o ${LIBS}
+
+crs: crs.o
+	${CXX} ${CXXFLAGS} -o crs crs.o ${LIBS}
+
+othersparse: othersparse.o
+	${CXX} ${CXXFLAGS} -o othersparse othersparse.o ${LIBS}
+
+clean:
+	rm -fr ${TO_CLEAN} ${TARGETS} saved_crs saved_rowmajor saved_binary

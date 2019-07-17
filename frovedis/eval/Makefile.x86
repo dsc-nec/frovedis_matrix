@@ -1,0 +1,22 @@
+include ../Makefile.in.x86
+
+TARGETS := evalspmv evalspmm conv
+
+LIBS := -L../core -lfrovedis_core -L../matrix -lfrovedis_matrix
+INCLUDES := -I../.. -I.
+
+CXXFLAGS := ${CXXFLAGS_COMMON} ${INCLUDES} -fopenmp
+
+all: ${TARGETS}
+
+evalspmv: evalspmv.o
+	${CXX} ${CXXFLAGS} -o evalspmv evalspmv.o ${LIBS}
+
+evalspmm: evalspmm.o
+	${CXX} ${CXXFLAGS} -o evalspmm evalspmm.o ${LIBS}
+
+conv: conv.o
+	${CXX} ${CXXFLAGS} -o conv conv.o ${LIBS}
+
+clean:
+	rm -fr ${TO_CLEAN} ${TARGETS} tmp

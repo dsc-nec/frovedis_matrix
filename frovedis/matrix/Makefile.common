@@ -1,0 +1,14 @@
+HEADERS := rowmajor_matrix.hpp colmajor_matrix.hpp crs_matrix.hpp ccs_matrix.hpp jds_matrix.hpp jds_crs_hybrid.hpp spmspv.hpp
+
+OBJS := rowmajor_matrix.o crs_matrix.o 
+
+TARGETS := libfrovedis_matrix.a
+CXXFLAGS := ${CXXFLAGS_COMMON} -I. -I..
+
+targets: ${TARGETS}
+
+rowmajor_matrix.o: rowmajor_matrix.cc rowmajor_matrix.hpp
+crs_matrix.o: crs_matrix.cc crs_matrix.hpp rowmajor_matrix.hpp
+
+clean:
+	${RM} ${TO_CLEAN} ${TARGETS}

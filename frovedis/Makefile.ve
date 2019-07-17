@@ -1,0 +1,12 @@
+all:
+	cd core; make -f Makefile.ve
+	cd matrix; make -f Makefile.ve
+	cd samples; make -f Makefile.ve
+	cd eval; make -f Makefile.ve
+
+clean:
+	cd core; make -f Makefile.ve clean
+	cd matrix; make -f Makefile.ve clean
+	cd samples; make -f Makefile.ve clean
+	cd eval; make -f Makefile.ve clean
+	rm -f *~

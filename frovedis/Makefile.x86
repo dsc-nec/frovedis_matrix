@@ -1,0 +1,12 @@
+all:
+	cd core; make -f Makefile.x86
+	cd matrix; make -f Makefile.x86
+	cd samples; make -f Makefile.x86
+	cd eval; make -f Makefile.x86
+
+clean:
+	cd core; make -f Makefile.x86 clean
+	cd matrix; make -f Makefile.x86 clean
+	cd samples; make -f Makefile.x86 clean
+	cd eval; make -f Makefile.x86 clean
+	rm -f *~

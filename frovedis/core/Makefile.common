@@ -1,0 +1,15 @@
+HEADERS := log.hpp utility.hpp radix_sort.incl radix_sort.hpp prefix_sum.hpp
+
+OBJS := utility.o log.o
+
+TARGETS := libfrovedis_core.a
+
+CXXFLAGS := ${CXXFLAGS_COMMON} -I. -I..
+
+targets: ${TARGETS}
+
+utility.o: utility.cc utility.hpp log.hpp
+log.o: log.cc log.hpp
+
+clean:
+	${RM} ${TO_CLEAN} ${TARGETS} 
