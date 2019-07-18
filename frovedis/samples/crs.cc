@@ -45,4 +45,8 @@ int main() {
   auto r3 = spgemm(crs,crs);
   cout << "SpGEMM" << endl;
   cout << r3 << endl;
+
+  set_diag_zero(crs);
+  cout << "set zero to diagonal" << endl;
+  cout << crs << endl;
 }

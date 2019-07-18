@@ -588,6 +588,16 @@ The result is also CRS matrix.
 You can also use CCS format as the imput. In this case, the result is
 CCS format. We are now improving the performance.
 
+To implement butterfly counting, I added functionality to set zero to 
+diagonal. 
+
+    set_diag_zero(crs);
+
+This overwrites `crs[i,i]` to 0 if it exists as non-zero value.
+You can specify `shift` as the second argument to set zero to
+`crs[i+shift,i]`, which can be used for splitted matrix for
+parallelization.
+
 ## 3.4 Other sparse matrix format
 
 Frovedis also supports other sparse matrix formats. Please look at

@@ -13,6 +13,9 @@
 
 #include "rowmajor_matrix.hpp"
 
+#define CRS_VLEN 256
+#define SET_DIAG_ZERO_THR 32
+
 #define CRS_SPMM_THR 32
 #define CRS_SPMM_VLEN 256
 #define SPARSE_VECTOR_VLEN 256
@@ -971,5 +974,163 @@ crs_matrix_local<T,I,O> rowmajor_matrix_local<T>::to_crs() {
   }
   return ret;
 }
+
+template <class T, class I, class O>
+void set_diag_zero_impl_raking(T* valp, I* idxp, O* offp,
+                               size_t num_row, size_t size,
+                               size_t shift = 0, bool sorted = false) {
+  auto each = ceil_div(size, size_t(CRS_VLEN));
+  if(each % 2 == 0) each++;
+  I row_ridx[CRS_VLEN]; // ridx: idx for raking
+#pragma _NEC vreg(row_ridx)
+  int valid[CRS_VLEN];
+//#pragma _NEC vreg(valid) // does not work on 2.3.0
+  for(size_t i = 0; i < CRS_VLEN; i++) valid[i] = true;
+  auto begin_it = offp;
+  auto end_it = offp + num_row;
+  auto current_it = begin_it;
+  row_ridx[0] = 0;
+  size_t ii = 1;
+  for(size_t i = 1; i < CRS_VLEN; i++) {
+    auto it = std::lower_bound(current_it, end_it, each * i);
+    if(it == current_it) continue;
+    else if(it == end_it) break;
+    else {
+      row_ridx[ii++] = it - begin_it;
+      current_it = it;
+    }
+  }
+  for(size_t i = ii; i < CRS_VLEN; i++) {
+    valid[i] = false;
+    row_ridx[i] = num_row;
+  }
+
+  I pos_ridx[CRS_VLEN]; 
+//#pragma _NEC vreg(pos_ridx) // does not work on 2.3.0
+  I pos_stop_ridx[CRS_VLEN]; 
+#pragma _NEC vreg(pos_stop_ridx)
+  for(size_t i = 0; i < CRS_VLEN; i++) {
+    if(valid[i]) pos_ridx[i] = offp[row_ridx[i]];
+    else pos_ridx[i] = size;
+  }
+  for(size_t i = 0; i < CRS_VLEN-1; i++) {
+    if(valid[i]) pos_stop_ridx[i] = pos_ridx[i+1];
+    else pos_stop_ridx[i] = size;
+  }
+  pos_stop_ridx[CRS_VLEN-1] = size;
+
+  I pos_nextrow_ridx[CRS_VLEN];
+#pragma _NEC vreg(pos_nextrow_ridx)
+  for(size_t i = 0; i < CRS_VLEN; i++) {
+    if(valid[i]) pos_nextrow_ridx[i] = offp[row_ridx[i]+1];
+    else pos_nextrow_ridx[i] = size;
+  }
+
+  I diag_ridx[CRS_VLEN];
+#pragma _NEC vreg(diag_ridx)
+  for(size_t i = 0; i < CRS_VLEN; i++) {
+    if(valid[i]) diag_ridx[i] = row_ridx[i] + shift;
+    else diag_ridx[i] = num_row;
+  }
+
+  int anyvalid = true;
+  if(sorted) {
+    while(anyvalid) {
+#pragma cdir nodep
+#pragma _NEC ivdep
+      for(size_t i = 0; i < CRS_VLEN; i++) {
+        if(valid[i]) {
+          if(pos_ridx[i] == pos_stop_ridx[i]) {
+            valid[i] = false;
+          } else if(pos_ridx[i] == pos_nextrow_ridx[i] ||
+                    idxp[pos_ridx[i]] > diag_ridx[i]) {
+            pos_ridx[i] = pos_nextrow_ridx[i];
+            row_ridx[i]++;
+            pos_nextrow_ridx[i] = offp[row_ridx[i]+1];
+            diag_ridx[i] = row_ridx[i] + shift;
+          } else {
+            if(idxp[pos_ridx[i]] == diag_ridx[i]) {
+              valp[pos_ridx[i]] = 0;
+            } 
+            pos_ridx[i]++;
+          }
+        }
+      }
+      anyvalid = false;
+      for(size_t i = 0; i < CRS_VLEN; i++) {
+        if(valid[i]) anyvalid = true;
+      }
+    }
+  } else {
+    while(anyvalid) {
+#pragma cdir nodep
+#pragma _NEC ivdep
+      for(size_t i = 0; i < CRS_VLEN; i++) {
+        if(valid[i]) {
+          if(pos_ridx[i] == pos_stop_ridx[i]) {
+            valid[i] = false;
+          } else if(pos_ridx[i] == pos_nextrow_ridx[i]) {
+            row_ridx[i]++;
+            pos_nextrow_ridx[i] = offp[row_ridx[i]+1];
+            diag_ridx[i] = row_ridx[i] + shift;
+          } else {
+            if(idxp[pos_ridx[i]] == diag_ridx[i]) {
+              valp[pos_ridx[i]] = 0;
+            } 
+            pos_ridx[i]++;
+          }
+        }
+      }
+      anyvalid = false;
+      for(size_t i = 0; i < CRS_VLEN; i++) {
+        if(valid[i]) anyvalid = true;
+      }
+    }
+  }
+}
+
+template <class T, class I, class O>
+void set_diag_zero_impl(T* valp, I* idxp, O* offp,
+                        size_t num_row, size_t size,
+                        size_t shift = 0, bool sorted = false) {
+  if(sorted) {
+    for(size_t r = 0; r < num_row; r++) {
+      size_t pos = offp[r];
+      size_t size = offp[r+1] - offp[r];
+      for(size_t cidx = 0; cidx < size; cidx++) {
+        if(idxp[pos + cidx] > r + shift) continue;
+        else if(idxp[pos + cidx] == r + shift) {
+          valp[pos + cidx] = 0;
+        }
+      }
+    }
+  } else {
+    for(size_t r = 0; r < num_row; r++) {
+      size_t pos = offp[r];
+      size_t size = offp[r+1] - offp[r];
+      for(size_t cidx = 0; cidx < size; cidx++) {
+        if(idxp[pos + cidx] == r + shift) {
+          valp[pos + cidx] = 0;
+        }
+      }
+    }
+  }
+}
+
+template <class T, class I, class O>
+void set_diag_zero(crs_matrix_local<T,I,O>& mat, size_t shift = 0,
+                   bool sorted = false) { // sorted is slower?
+  auto valp = mat.val.data();
+  auto idxp = mat.idx.data();
+  auto offp = mat.off.data();
+  auto num_row = mat.local_num_row;
+  auto size  = mat.val.size();
+  if(size == 0 || num_row == 0) return;
+  if(size / num_row > SET_DIAG_ZERO_THR)
+    set_diag_zero_impl(valp, idxp, offp, num_row, size, shift, sorted);
+  else
+    set_diag_zero_impl_raking(valp, idxp, offp, num_row, size, shift, sorted);
+}
+
 }
 #endif
