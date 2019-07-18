@@ -595,7 +595,7 @@ diagonal.
 
 This overwrites `crs[i,i]` to 0 if it exists as non-zero value.
 You can specify `shift` as the second argument to set zero to
-`crs[i+shift,i]`, which can be used for splitted matrix for
+`crs[i,i+shift]`, which can be used for splitted matrix for
 parallelization.
 
 ## 3.4 Other sparse matrix format
