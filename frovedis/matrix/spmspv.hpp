@@ -162,7 +162,7 @@ void spmspv_mul(T* mat_valp, I* mat_idxp, O* mat_offp,
   auto each = ceil_div(total_nnz, size_t(SPMSPV_VLEN));
   if(each % 2 == 0) each++;
   I svpos_ridx[SPMSPV_VLEN]; // ridx: idx for raking
-#pragma _NEC vreg(svpos_ridx)
+//#pragma _NEC vreg(svpos_ridx) // buggy?
   int valid[SPMSPV_VLEN];
 //#pragma _NEC vreg(valid)
   for(size_t i = 0; i < SPMSPV_VLEN; i++) valid[i] = true;
@@ -185,24 +185,24 @@ void spmspv_mul(T* mat_valp, I* mat_idxp, O* mat_offp,
     svpos_ridx[i] = sv_size;
   }
   I muloutpos_ridx[SPMSPV_VLEN];
-#pragma _NEC vreg(muloutpos_ridx)
+//#pragma _NEC vreg(muloutpos_ridx) // buggy?
   muloutpos_ridx[0] = 0;
   for(size_t i = 1; i < SPMSPV_VLEN; i++) {
     if(valid[i]) muloutpos_ridx[i] = pfx_sum_nnzp[svpos_ridx[i]-1];
     else muloutpos_ridx[i] = total_nnz;
   }
   I muloutpos_stop_ridx[SPMSPV_VLEN];
-#pragma _NEC vreg(muloutpos_stop_ridx)
+//#pragma _NEC vreg(muloutpos_stop_ridx) // buggy?
   for(int i = 0; i < SPMSPV_VLEN - 1; i++) {
     muloutpos_stop_ridx[i] = muloutpos_ridx[i + 1];
   }
   muloutpos_stop_ridx[SPMSPV_VLEN-1] = total_nnz;
   O matpos_ridx[SPMSPV_VLEN];
-#pragma _NEC vreg(matpos_ridx)
+//#pragma _NEC vreg(matpos_ridx)  // buggy?
   O matpos_stop_ridx[SPMSPV_VLEN];
-#pragma _NEC vreg(matpos_stop_ridx)
+//#pragma _NEC vreg(matpos_stop_ridx) // buggy?
   T current_sv_val_ridx[SPMSPV_VLEN];
-#pragma _NEC vreg(current_sv_val_ridx)
+//#pragma _NEC vreg(current_sv_val_ridx) // buggy?
   for(size_t i = 0; i < SPMSPV_VLEN; i++) {
     if(valid[i]) {
       matpos_ridx[i] = mat_offp[sv_idxp[svpos_ridx[i]]];
