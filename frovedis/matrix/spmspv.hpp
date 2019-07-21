@@ -4,6 +4,7 @@
 #include "ccs_matrix.hpp"
 
 #define SPMSPV_VLEN 256
+#define SPMSPV_MUL_THR 8
 
 #include "../core/prefix_sum.hpp"
 #include "../core/radix_sort.hpp"
@@ -155,14 +156,14 @@ void groupby_sum(const K* keyp, const V* valp, size_t size,
 }
 
 template <class T, class I, class O>
-void spmspv_mul(T* mat_valp, I* mat_idxp, O* mat_offp,
-                T* sv_valp, I* sv_idxp, size_t sv_size,
-                O* nnzp, O* pfx_sum_nnzp, size_t total_nnz,
-                T* mulout_valp, I* mulout_idxp) {
+void spmspv_mul_raking(T* mat_valp, I* mat_idxp, O* mat_offp,
+                       T* sv_valp, I* sv_idxp, size_t sv_size,
+                       O* nnzp, O* pfx_sum_nnzp, size_t total_nnz,
+                       T* mulout_valp, I* mulout_idxp) {
   auto each = ceil_div(total_nnz, size_t(SPMSPV_VLEN));
   if(each % 2 == 0) each++;
   I svpos_ridx[SPMSPV_VLEN]; // ridx: idx for raking
-//#pragma _NEC vreg(svpos_ridx) // buggy?
+//#pragma _NEC vreg(svpos_ridx)
   int valid[SPMSPV_VLEN];
 //#pragma _NEC vreg(valid)
   for(size_t i = 0; i < SPMSPV_VLEN; i++) valid[i] = true;
@@ -185,24 +186,24 @@ void spmspv_mul(T* mat_valp, I* mat_idxp, O* mat_offp,
     svpos_ridx[i] = sv_size;
   }
   I muloutpos_ridx[SPMSPV_VLEN];
-//#pragma _NEC vreg(muloutpos_ridx) // buggy?
+//#pragma _NEC vreg(muloutpos_ridx)
   muloutpos_ridx[0] = 0;
   for(size_t i = 1; i < SPMSPV_VLEN; i++) {
     if(valid[i]) muloutpos_ridx[i] = pfx_sum_nnzp[svpos_ridx[i]-1];
     else muloutpos_ridx[i] = total_nnz;
   }
   I muloutpos_stop_ridx[SPMSPV_VLEN];
-//#pragma _NEC vreg(muloutpos_stop_ridx) // buggy?
+//#pragma _NEC vreg(muloutpos_stop_ridx)
   for(int i = 0; i < SPMSPV_VLEN - 1; i++) {
     muloutpos_stop_ridx[i] = muloutpos_ridx[i + 1];
   }
   muloutpos_stop_ridx[SPMSPV_VLEN-1] = total_nnz;
   O matpos_ridx[SPMSPV_VLEN];
-//#pragma _NEC vreg(matpos_ridx)  // buggy?
+//#pragma _NEC vreg(matpos_ridx)
   O matpos_stop_ridx[SPMSPV_VLEN];
-//#pragma _NEC vreg(matpos_stop_ridx) // buggy?
+//#pragma _NEC vreg(matpos_stop_ridx)
   T current_sv_val_ridx[SPMSPV_VLEN];
-//#pragma _NEC vreg(current_sv_val_ridx) // buggy?
+//#pragma _NEC vreg(current_sv_val_ridx)
   for(size_t i = 0; i < SPMSPV_VLEN; i++) {
     if(valid[i]) {
       matpos_ridx[i] = mat_offp[sv_idxp[svpos_ridx[i]]];
@@ -236,6 +237,49 @@ void spmspv_mul(T* mat_valp, I* mat_idxp, O* mat_offp,
     for(size_t i = 0; i < SPMSPV_VLEN; i++) {
       if(valid[i]) anyvalid = true;
     }
+  }
+}
+
+template <class T, class I, class O>
+void spmspv_mul_noraking(T* mat_valp, I* mat_idxp, O* mat_offp,
+                         T* sv_valp, I* sv_idxp, size_t sv_size,
+                         O* nnzp, O* pfx_sum_nnzp, 
+                         T* mulout_valp, I* mulout_idxp) {
+  if(sv_size > 0) { // for "outoff = pfx_sum_nnzp[i-1]"
+    auto matoff = mat_offp[sv_idxp[0]];
+    auto svval = sv_valp[0];
+    auto outoff = 0;
+    for(size_t j = 0; j < nnzp[0]; j++) {
+      mulout_idxp[outoff + j] = mat_idxp[matoff + j];
+      mulout_valp[outoff + j] = svval * mat_valp[matoff + j];
+    }
+  }
+  for(size_t i = 1; i < sv_size; i++) {
+    auto matoff = mat_offp[sv_idxp[i]];
+    auto svval = sv_valp[i];
+    auto outoff = pfx_sum_nnzp[i-1];
+    for(size_t j = 0; j < nnzp[i]; j++) {
+      mulout_idxp[outoff + j] = mat_idxp[matoff + j];
+      mulout_valp[outoff + j] = svval * mat_valp[matoff + j];
+    }
+  }
+}
+
+template <class T, class I, class O>
+void spmspv_mul(T* mat_valp, I* mat_idxp, O* mat_offp,
+                T* sv_valp, I* sv_idxp, size_t sv_size,
+                O* nnzp, O* pfx_sum_nnzp, size_t total_nnz,
+                T* mulout_valp, I* mulout_idxp) {
+  if(total_nnz / sv_size > SPMSPV_MUL_THR) {
+    spmspv_mul_noraking(mat_valp, mat_idxp, mat_offp,
+                        sv_valp, sv_idxp, sv_size,
+                        nnzp, pfx_sum_nnzp,
+                        mulout_valp, mulout_idxp);
+  } else {
+    spmspv_mul_raking(mat_valp, mat_idxp, mat_offp,
+                      sv_valp, sv_idxp, sv_size,
+                      nnzp, pfx_sum_nnzp, total_nnz,
+                      mulout_valp, mulout_idxp);
   }
 }
 

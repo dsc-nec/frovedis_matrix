@@ -226,7 +226,8 @@ void spgemm_esc(T* lval, I* lidx, O* loff,
          + std::to_string(total_interim_nnz) + ", time = ");
   
   spgemm_esc_helper(lval, lidx, loff, rval, ridx, rnnz, total_interim_nnz,
-                    merged_interim_nnzp, pfx_sum_merged_interim_nnz.data(),
+                    merged_interim_nnz.data(),
+                    pfx_sum_merged_interim_nnz.data(),
                     each_column_nnzp, rnum_col,
                     max_idx_bits, lnum_row, retval, retidx, retoff);
 }
