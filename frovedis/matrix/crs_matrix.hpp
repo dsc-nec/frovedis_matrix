@@ -357,10 +357,10 @@ void transpose_compressed_matrix(std::vector<T>& val,
   ret_val.resize(val.size());
   ret_idx.resize(idx.size());
   ret_off.resize(local_num_col + 1);
-  std::vector<size_t> num_item(local_num_col);
-  std::vector<size_t> current_item(local_num_col);
-  size_t* num_itemp = &num_item[0];
-  size_t* current_itemp = &current_item[0];
+  std::vector<O> num_item(local_num_col);
+  std::vector<O> current_item(local_num_col);
+  O* num_itemp = &num_item[0];
+  O* current_itemp = &current_item[0];
   T* ret_valp = &ret_val[0];
   I* ret_idxp = &ret_idx[0];
   O* ret_offp = &ret_off[0];
@@ -383,9 +383,9 @@ void transpose_compressed_matrix(std::vector<T>& val,
 #pragma _NEC ivdep
     for(O src_pos = offp[src_row]; src_pos < offp[src_row + 1];
         src_pos++) {
-      size_t src_col = idxp[src_pos];
+      auto src_col = idxp[src_pos];
       T src_val = valp[src_pos];
-      size_t dst_pos = ret_offp[src_col] + current_itemp[src_col];
+      auto dst_pos = ret_offp[src_col] + current_itemp[src_col];
       ret_valp[dst_pos] = src_val;
       ret_idxp[dst_pos] = src_row;
       current_itemp[src_col]++;
