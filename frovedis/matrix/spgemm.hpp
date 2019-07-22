@@ -41,11 +41,12 @@ void add_column_idx(I* mulout_idx, O* merged_total_nnzp,
 }
 
 template <class I, class O>
-void extract_column_idx(I* idx, I* extracted, O size, size_t bits) {
-  I mask = (I(1) << bits) - 1;
+void extract_column_idx(size_t* idxtmp, int* extracted, I* idx,
+                        O size, size_t bits) {
+  size_t mask = (static_cast<size_t>(1) << bits) - 1;
   for(size_t i = 0; i < size; i++) {
-    extracted[i] = idx[i] >> bits;
-    idx[i] &= mask;
+    extracted[i] = idxtmp[i] >> bits;
+    idx[i] = idxtmp[i] & mask;
   }
 }
 
@@ -148,26 +149,28 @@ void spgemm_esc_helper(T* mat_valp, I* mat_idxp, O* mat_offp,
   time_spent t(DEBUG);
   if(sv_size == 0) return;
   std::vector<T> mulout_val(total_nnz);
-  std::vector<I> mulout_idx(total_nnz);
+  std::vector<size_t> mulout_idx(total_nnz); // to hold enough bits
   auto mulout_valp = mulout_val.data();
   auto mulout_idxp = mulout_idx.data();
   spmspv_mul(mat_valp, mat_idxp, mat_offp, sv_valp, sv_idxp, sv_size,
              nnzp, pfx_sum_nnz, total_nnz,
              mulout_valp, mulout_idxp);
   t.show("spmspv_mul: ");
-  add_column_idx(mulout_idx.data(), merged_total_nnzp,
+  add_column_idx(mulout_idxp, merged_total_nnzp, 
                  merged_count, max_idx_bits);
   t.show("add_column_idx: ");
   auto used_bits = max_bits(merged_count-1);
   auto max_key_size = ceil_div(max_idx_bits + used_bits, size_t(8));
   radix_sort_impl(mulout_idxp, mulout_valp, total_nnz, max_key_size);
   t.show("radix_sort: ");
-  groupby_sum(mulout_idxp, mulout_valp, total_nnz, retidx, retval);
+  std::vector<size_t> retidxtmp;
+  groupby_sum(mulout_idxp, mulout_valp, total_nnz, retidxtmp, retval);
   t.show("groupby_sum: ");
-  std::vector<I> extracted_idx(retidx.size());
+  std::vector<int> extracted_idx(retidxtmp.size());
+  retidx.resize(retidxtmp.size());
   auto extracted_idxp = extracted_idx.data();
-  extract_column_idx(retidx.data(), extracted_idxp, retidx.size(),
-                     max_idx_bits);
+  extract_column_idx(retidxtmp.data(), extracted_idxp, retidx.data(),
+                     retidxtmp.size(), max_idx_bits);
   t.show("extract_column_idx: ");
   auto separated = my_set_separate(extracted_idx);
   t.show("set_separate: ");
@@ -198,8 +201,6 @@ void spgemm_esc(T* lval, I* lidx, O* loff,
                 std::vector<O>& retoff) {
   if(rnnz == 0) return;
   size_t max_idx_bits = max_bits(lnum_row);
-  if(max_idx_bits + max_bits(rnum_col) > std::numeric_limits<I>::digits)
-    throw std::runtime_error("Index type is small. use larger type");
 
   time_spent t(DEBUG);
   std::vector<O> merged_interim_nnz(rnnz);
@@ -242,22 +243,24 @@ spgemm_helper_merged(T* mat_valp, I* mat_idxp, O* mat_offp,
   sparse_vector<T,I> ret;
   if(sv_size == 0) return ret;
   std::vector<T> mulout_val(total_nnz);
-  std::vector<I> mulout_idx(total_nnz);
+  std::vector<size_t> mulout_idx(total_nnz);
   auto mulout_valp = mulout_val.data();
   auto mulout_idxp = mulout_idx.data();
   spmspv_mul(mat_valp, mat_idxp, mat_offp, sv_valp, sv_idxp, sv_size,
              nnzp, pfx_sum_nnz, total_nnz,
              mulout_valp, mulout_idxp);
-  add_column_idx(mulout_idx.data(), merged_total_nnzp,
+  add_column_idx(mulout_idxp, merged_total_nnzp,
                  merged_count, max_idx_bits);
   auto used_bits = max_bits(merged_count-1);
   auto max_key_size = ceil_div(max_idx_bits + used_bits, size_t(8));
   radix_sort_impl(mulout_idxp, mulout_valp, total_nnz, max_key_size);
-  groupby_sum(mulout_idxp, mulout_valp, total_nnz, ret.idx, ret.val);
-  std::vector<I> extracted_idx(ret.idx.size());
+  std::vector<size_t> retidxtmp;
+  groupby_sum(mulout_idxp, mulout_valp, total_nnz, retidxtmp, ret.val);
+  std::vector<int> extracted_idx(retidxtmp.size());
+  ret.idx.resize(retidxtmp.size());
   auto extracted_idxp = extracted_idx.data();
-  extract_column_idx(ret.idx.data(), extracted_idxp, ret.idx.size(),
-                     max_idx_bits);
+  extract_column_idx(retidxtmp.data(), extracted_idxp, ret.idx.data(),
+                     retidxtmp.size(), max_idx_bits);
   auto separated = my_set_separate(extracted_idx);
   // might be smaller than merged_count if sparse vector is zero
   auto separated_size = separated.size();
@@ -353,20 +356,15 @@ void spgemm(T* lval, I* lidx, O* loff,
             std::vector<T>& retval, std::vector<I>& retidx,
             std::vector<O>& retoff,
             spgemm_type type = spgemm_type::block_esc_dense,
-            size_t max_merge_column = 65535,
-            double dense_mode_ratio = 0.01) {
+            size_t max_merge_column = 4095,
+            double dense_mode_ratio = 0.1) {
   time_spent sparse_merge(DEBUG), dense(DEBUG);
   size_t sparse_merged_columns = 0, dense_columns = 0;
   if(rnnz == 0) return;
   bool is_dense = false;
   if(type == spgemm_type::block_esc_dense) is_dense = true;
   auto dense_thr = static_cast<O>(lnum_row * dense_mode_ratio);
-  size_t max_merge_column_bits;
-  max_merge_column_bits = max_bits(std::min(max_merge_column,rnum_col));
   size_t max_idx_bits = max_bits(lnum_row);
-  if(max_idx_bits + max_merge_column_bits > std::numeric_limits<I>::digits)
-    throw std::runtime_error
-      ("Index type is small. use larger type or smaller max_merge_column");
 
   std::vector<O> merged_interim_nnz(rnnz);
   auto merged_interim_nnzp = merged_interim_nnz.data();
@@ -479,7 +477,7 @@ ccs_matrix_local<T,I,O>
 spgemm(ccs_matrix_local<T,I,O>& left, 
        ccs_matrix_local<T,I,O>& right,
        spgemm_type type = spgemm_type::block_esc,
-       size_t max_merge_column = 1023,
+       size_t max_merge_column = 4095,
        double dense_mode_ratio = 0.1) {
   if(left.local_num_col != right.local_num_row) 
     throw std::runtime_error("spgemm: matrix size mismatch");
@@ -507,7 +505,7 @@ crs_matrix_local<T,I,O>
 spgemm(crs_matrix_local<T,I,O>& a,
        crs_matrix_local<T,I,O>& b, 
        spgemm_type type = spgemm_type::block_esc,
-       size_t max_merge_column = 1023,
+       size_t max_merge_column = 4095,
        double dense_mode_ratio = 0.1) {
   if(a.local_num_col != b.local_num_row) 
     throw std::runtime_error("spgemm: matrix size mismatch");
