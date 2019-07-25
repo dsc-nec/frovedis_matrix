@@ -3,8 +3,13 @@
 
 #include "ccs_matrix.hpp"
 
+#ifdef __ve__
 #define SPMSPV_VLEN 256
 #define SPMSPV_MUL_THR 8
+#else
+#define SPMSPV_VLEN 1
+#define SPMSPV_MUL_THR 0
+#endif
 
 #include "../core/prefix_sum.hpp"
 #include "../core/radix_sort.hpp"
@@ -71,6 +76,11 @@ void groupby_sum(const K* keyp, const V* valp, size_t size,
       current_key[i] = keyp[each * i];
       current_val[i] = valp[each * i];
     }
+    size_t out_ridx_vreg[SPMSPV_VLEN];
+#pragma _NEC vreg(out_ridx_vreg)
+    for(size_t i = 0; i < SPMSPV_VLEN; i++)
+      out_ridx_vreg[i] = out_ridx[i];
+
     for(size_t j = 1; j < each; j++) {
 #pragma cdir nodep
 #pragma _NEC ivdep
@@ -78,9 +88,9 @@ void groupby_sum(const K* keyp, const V* valp, size_t size,
         auto loaded_key = keyp[j + each * i];
         auto loaded_val = valp[j + each * i];
         if(loaded_key != current_key[i]) {
-          outkeytmpp[out_ridx[i]] = current_key[i];
-          outvaltmpp[out_ridx[i]] = current_val[i];
-          out_ridx[i]++;
+          outkeytmpp[out_ridx_vreg[i]] = current_key[i];
+          outvaltmpp[out_ridx_vreg[i]] = current_val[i];
+          out_ridx_vreg[i]++;
           current_key[i] = loaded_key;
           current_val[i] = loaded_val;
         } else {
@@ -88,6 +98,9 @@ void groupby_sum(const K* keyp, const V* valp, size_t size,
         }
       }
     }
+    for(size_t i = 0; i < SPMSPV_VLEN; i++)
+      out_ridx[i] = out_ridx_vreg[i];
+
     size_t rest_idx = each * SPMSPV_VLEN;
     if(rest != 0) {
       size_t rest_idx_start = rest_idx;
@@ -155,17 +168,15 @@ void groupby_sum(const K* keyp, const V* valp, size_t size,
   }
 }
 
-template <class T, class I, class O>
+template <class T, class I, class O, class II>
 void spmspv_mul_raking(T* mat_valp, I* mat_idxp, O* mat_offp,
                        T* sv_valp, I* sv_idxp, size_t sv_size,
-                       O* nnzp, O* pfx_sum_nnzp, size_t total_nnz,
-                       T* mulout_valp, I* mulout_idxp) {
-  auto each = ceil_div(total_nnz, size_t(SPMSPV_VLEN));
+                       O* nnzp, O* pfx_sum_nnzp, O total_nnz,
+                       T* mulout_valp, II* mulout_idxp) {
+  auto each = ceil_div(total_nnz, O(SPMSPV_VLEN));
   if(each % 2 == 0) each++;
-  I svpos_ridx[SPMSPV_VLEN]; // ridx: idx for raking
-//#pragma _NEC vreg(svpos_ridx)
+  size_t svpos_ridx[SPMSPV_VLEN]; // ridx: idx for raking
   int valid[SPMSPV_VLEN];
-//#pragma _NEC vreg(valid)
   for(size_t i = 0; i < SPMSPV_VLEN; i++) valid[i] = true;
   auto begin_it = pfx_sum_nnzp;
   auto end_it = pfx_sum_nnzp + sv_size;
@@ -185,25 +196,20 @@ void spmspv_mul_raking(T* mat_valp, I* mat_idxp, O* mat_offp,
     valid[i] = false;
     svpos_ridx[i] = sv_size;
   }
-  I muloutpos_ridx[SPMSPV_VLEN];
-//#pragma _NEC vreg(muloutpos_ridx)
+  O muloutpos_ridx[SPMSPV_VLEN];
   muloutpos_ridx[0] = 0;
   for(size_t i = 1; i < SPMSPV_VLEN; i++) {
     if(valid[i]) muloutpos_ridx[i] = pfx_sum_nnzp[svpos_ridx[i]-1];
     else muloutpos_ridx[i] = total_nnz;
   }
-  I muloutpos_stop_ridx[SPMSPV_VLEN];
-//#pragma _NEC vreg(muloutpos_stop_ridx)
+  O muloutpos_stop_ridx[SPMSPV_VLEN];
   for(int i = 0; i < SPMSPV_VLEN - 1; i++) {
     muloutpos_stop_ridx[i] = muloutpos_ridx[i + 1];
   }
   muloutpos_stop_ridx[SPMSPV_VLEN-1] = total_nnz;
   O matpos_ridx[SPMSPV_VLEN];
-//#pragma _NEC vreg(matpos_ridx)
   O matpos_stop_ridx[SPMSPV_VLEN];
-//#pragma _NEC vreg(matpos_stop_ridx)
   T current_sv_val_ridx[SPMSPV_VLEN];
-//#pragma _NEC vreg(current_sv_val_ridx)
   for(size_t i = 0; i < SPMSPV_VLEN; i++) {
     if(valid[i]) {
       matpos_ridx[i] = mat_offp[sv_idxp[svpos_ridx[i]]];
@@ -213,6 +219,8 @@ void spmspv_mul_raking(T* mat_valp, I* mat_idxp, O* mat_offp,
   }
   int anyvalid = true;
   while(anyvalid) {
+    // TODO: create and use vreg version of array
+    // (noraking version is fast enough, though)
 #pragma cdir nodep
 #pragma _NEC ivdep
     for(size_t i = 0; i < SPMSPV_VLEN; i++) {
@@ -240,11 +248,11 @@ void spmspv_mul_raking(T* mat_valp, I* mat_idxp, O* mat_offp,
   }
 }
 
-template <class T, class I, class O>
+template <class T, class I, class O, class II>
 void spmspv_mul_noraking(T* mat_valp, I* mat_idxp, O* mat_offp,
                          T* sv_valp, I* sv_idxp, size_t sv_size,
                          O* nnzp, O* pfx_sum_nnzp, 
-                         T* mulout_valp, I* mulout_idxp) {
+                         T* mulout_valp, II* mulout_idxp) {
   if(sv_size > 0) { // for "outoff = pfx_sum_nnzp[i-1]"
     auto matoff = mat_offp[sv_idxp[0]];
     auto svval = sv_valp[0];
@@ -265,11 +273,12 @@ void spmspv_mul_noraking(T* mat_valp, I* mat_idxp, O* mat_offp,
   }
 }
 
-template <class T, class I, class O>
+// class II is for spgemm to use size_t arrray
+template <class T, class I, class O, class II>
 void spmspv_mul(T* mat_valp, I* mat_idxp, O* mat_offp,
                 T* sv_valp, I* sv_idxp, size_t sv_size,
-                O* nnzp, O* pfx_sum_nnzp, size_t total_nnz,
-                T* mulout_valp, I* mulout_idxp) {
+                O* nnzp, O* pfx_sum_nnzp, O total_nnz,
+                T* mulout_valp, II* mulout_idxp) {
   if(total_nnz / sv_size > SPMSPV_MUL_THR) {
     spmspv_mul_noraking(mat_valp, mat_idxp, mat_offp,
                         sv_valp, sv_idxp, sv_size,
@@ -287,7 +296,7 @@ template <class T, class I, class O>
 void spmspv_impl(T* mat_valp, I* mat_idxp, O* mat_offp,
                  T* sv_valp, I* sv_idxp, size_t sv_size,
                  T* mulout_valp, I* mulout_idxp,
-                 O* nnzp, O* pfx_sum_nnzp, size_t total_nnz,
+                 O* nnzp, O* pfx_sum_nnzp, O total_nnz,
                  sparse_vector<T,I>& ret, size_t num_row,
                  bool check_sort_max_key = true,
                  size_t max_key_size = sizeof(I)) {
@@ -457,7 +466,7 @@ void spmspv(ccs_matrix_local<T,I,O>& mat, sparse_vector<T,I>& sv,
   } else {
     std::vector<O> pfx_sum_new_nnz(new_sv_size);
     prefix_sum(new_nnzp, pfx_sum_new_nnz.data(), new_sv_size);
-    size_t total_new_nnz = pfx_sum_new_nnz[new_sv_size - 1];
+    auto total_new_nnz = pfx_sum_new_nnz[new_sv_size - 1];
     std::vector<T> mulout_val(total_new_nnz);
     std::vector<I> mulout_idx(total_new_nnz);
     std::vector<T> mulout_val_tmp(total_new_nnz);
