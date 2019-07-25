@@ -168,6 +168,154 @@ void groupby_sum(const K* keyp, const V* valp, size_t size,
   }
 }
 
+template <class K, class V>
+void groupby_sum_binary_input(const K* keyp, size_t size,
+                              std::vector<K>& outkey, std::vector<V>& outval) {
+  if(size == 0) {
+    outkey.resize(0); outval.resize(0);
+    return;
+  }
+  std::vector<K> outkeytmp;
+  std::vector<V> outvaltmp;
+  outkeytmp.resize(size);
+  outvaltmp.resize(size);
+  K* outkeytmpp = outkeytmp.data();
+  V* outvaltmpp = outvaltmp.data();
+  size_t each = size / SPMSPV_VLEN; // maybe 0
+  if(each % 2 == 0 && each > 1) each--;
+  size_t rest = size - each * SPMSPV_VLEN;
+  size_t out_ridx[SPMSPV_VLEN];
+  for(size_t i = 0; i < SPMSPV_VLEN; i++) {
+    out_ridx[i] = each * i;
+  }
+  if(each == 0) {
+    // rest is not zero, sicne size is not zero
+    auto current_key_rest = keyp[0];
+    auto current_val_rest = 0;
+    size_t rest_idx = 0;
+    // no vector loop
+    for(size_t j = 1; j < rest; j++) {
+      auto loaded_key_rest = keyp[j]; 
+      if(loaded_key_rest != current_key_rest) {
+        outkeytmpp[rest_idx] = current_key_rest;
+        outvaltmpp[rest_idx] = current_val_rest;
+        rest_idx++;
+        current_key_rest = loaded_key_rest;
+        current_val_rest = 1;
+      } else {
+        current_val_rest++;
+      }
+    }
+    outkeytmpp[rest_idx] = current_key_rest;
+    outvaltmpp[rest_idx] = current_val_rest;
+    rest_idx++;
+    size_t total = rest_idx;
+    outkey.resize(total);
+    outval.resize(total);
+    K* outkeyp = outkey.data();
+    V* outvalp = outval.data();
+    for(size_t j = 0; j < rest_idx; j++) {
+      outkeyp[j] = outkeytmpp[j];
+      outvalp[j] = outvaltmpp[j];
+    }
+  } else {
+    K current_key[SPMSPV_VLEN];
+    V current_val[SPMSPV_VLEN];
+    // load 1st element
+    for(size_t i = 0; i < SPMSPV_VLEN; i++) {
+      current_key[i] = keyp[each * i];
+      current_val[i] = 1;
+    }
+    size_t out_ridx_vreg[SPMSPV_VLEN];
+#pragma _NEC vreg(out_ridx_vreg)
+    for(size_t i = 0; i < SPMSPV_VLEN; i++)
+      out_ridx_vreg[i] = out_ridx[i];
+
+    for(size_t j = 1; j < each; j++) {
+#pragma cdir nodep
+#pragma _NEC ivdep
+      for(size_t i = 0; i < SPMSPV_VLEN; i++) {
+        auto loaded_key = keyp[j + each * i];
+        if(loaded_key != current_key[i]) {
+          outkeytmpp[out_ridx_vreg[i]] = current_key[i];
+          outvaltmpp[out_ridx_vreg[i]] = current_val[i];
+          out_ridx_vreg[i]++;
+          current_key[i] = loaded_key;
+          current_val[i] = 1;
+        } else {
+          current_val[i]++;
+        }
+      }
+    }
+    for(size_t i = 0; i < SPMSPV_VLEN; i++)
+      out_ridx[i] = out_ridx_vreg[i];
+
+    size_t rest_idx = each * SPMSPV_VLEN;
+    if(rest != 0) {
+      size_t rest_idx_start = rest_idx;
+      auto current_key_rest = keyp[rest_idx_start];
+      auto current_val_rest = 1;
+      // no vector loop
+      for(size_t j = 1; j < rest; j++) {
+        auto loaded_key_rest = keyp[j + rest_idx_start]; 
+        if(loaded_key_rest != current_key_rest) {
+          outkeytmpp[rest_idx] = current_key_rest;
+          outvaltmpp[rest_idx] = current_val_rest;
+          rest_idx++;
+          current_key_rest = loaded_key_rest;
+          current_val_rest = 1;
+        } else {
+          current_val_rest++;
+        }
+      }
+      outkeytmpp[rest_idx] = current_key_rest;
+      outvaltmpp[rest_idx] = current_val_rest;
+      rest_idx++;
+    }
+    // no vector loop
+    for(size_t i = 0; i < SPMSPV_VLEN; i++) {
+      if(current_key[i] == keyp[each * (i+1)]) {
+        // still working...
+        if(i != SPMSPV_VLEN - 1 && current_key[i] == current_key[i+1])
+          current_val[i+1] += current_val[i];
+        else
+          outvaltmpp[each * (i+1)] += current_val[i];
+      } else {
+        outkeytmpp[out_ridx[i]] = current_key[i];
+        outvaltmpp[out_ridx[i]] = current_val[i];
+        out_ridx[i]++;        
+      }
+    }
+    size_t sizes[SPMSPV_VLEN];
+    for(size_t i = 0; i < SPMSPV_VLEN; i++) {
+      sizes[i] = out_ridx[i] - each * i;
+    }
+    size_t total = 0;
+    for(size_t i = 0; i < SPMSPV_VLEN; i++) {
+      total += sizes[i];
+    }
+    size_t rest_size = rest_idx - each * SPMSPV_VLEN;
+    total += rest_size;
+    outkey.resize(total);
+    outval.resize(total);
+    K* outkeyp = outkey.data();
+    V* outvalp = outval.data();
+    size_t current = 0;
+    for(size_t i = 0; i < SPMSPV_VLEN; i++) {
+      for(size_t j = 0; j < sizes[i]; j++) {
+        outkeyp[current + j] = outkeytmpp[each * i + j];
+        outvalp[current + j] = outvaltmpp[each * i + j];
+      }
+      current += sizes[i];
+    }
+    // rest (and rest_idx) maybe 0
+    for(size_t j = 0; j < rest_size; j++) {
+      outkeyp[current + j] = outkeytmpp[each * SPMSPV_VLEN + j];
+      outvalp[current + j] = outvaltmpp[each * SPMSPV_VLEN + j];
+    }
+  }
+}
+
 template <class T, class I, class O, class II>
 void spmspv_mul_raking(T* mat_valp, I* mat_idxp, O* mat_offp,
                        T* sv_valp, I* sv_idxp, size_t sv_size,
@@ -289,6 +437,28 @@ void spmspv_mul(T* mat_valp, I* mat_idxp, O* mat_offp,
                       sv_valp, sv_idxp, sv_size,
                       nnzp, pfx_sum_nnzp, total_nnz,
                       mulout_valp, mulout_idxp);
+  }
+}
+
+// for now, only noraking version...
+template <class I, class O, class II>
+void spmspv_mul_binary_input(I* mat_idxp, O* mat_offp,
+                             I* sv_idxp, size_t sv_size,
+                             O* nnzp, O* pfx_sum_nnzp, O total_nnz,
+                             II* mulout_idxp) {
+  if(sv_size > 0) { // for "outoff = pfx_sum_nnzp[i-1]"
+    auto matoff = mat_offp[sv_idxp[0]];
+    auto outoff = 0;
+    for(size_t j = 0; j < nnzp[0]; j++) {
+      mulout_idxp[outoff + j] = mat_idxp[matoff + j];
+    }
+  }
+  for(size_t i = 1; i < sv_size; i++) {
+    auto matoff = mat_offp[sv_idxp[i]];
+    auto outoff = pfx_sum_nnzp[i-1];
+    for(size_t j = 0; j < nnzp[i]; j++) {
+      mulout_idxp[outoff + j] = mat_idxp[matoff + j];
+    }
   }
 }
 

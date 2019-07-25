@@ -19,7 +19,8 @@ enum spgemm_type {
   esc,
   block_esc,
   hash,
-  hash_sort
+  hash_sort,
+  block_esc_binary_input
 };
 
 template <class T>
@@ -407,6 +408,125 @@ void spgemm_block_esc(T* lval, I* lidx, O* loff,
                                  pfx_sum_merged_interim_nnzp,
                                  each_column_nnzp, merge_size,
                                  max_idx_bits, retofftmpp));
+      crnt_rc += merge_size;
+      if(crnt_rc == rnum_col) break;
+      merged_interim_nnzp += crnt_size;
+      each_column_nnzp += merge_size;
+      retofftmpp += merge_size;
+    }
+  }
+  t.show("time for creating sparse vectors: ");
+  create_sparse_matrix(out_sparse_vector, retval, retidx, retoff, retofftmp);
+  t.show("time for creating sparse matrix: ");
+}
+
+template <class T, class I, class O>
+sparse_vector<T,I>
+spgemm_block_esc_binary_input_helper
+(T* mat_valp, I* mat_idxp, O* mat_offp,
+ T* sv_valp, I* sv_idxp, O sv_size,
+ O total_nnz, O* nnzp, O* pfx_sum_nnz,
+ O* merged_total_nnzp, size_t merged_count,
+ size_t max_idx_bits, O* merged_offp) {
+  sparse_vector<T,I> ret;
+  if(sv_size == 0) return ret;
+  std::vector<size_t> mulout_idx(total_nnz);
+  auto mulout_idxp = mulout_idx.data();
+  spmspv_mul_binary_input
+    (mat_idxp, mat_offp, sv_idxp, sv_size,
+     nnzp, pfx_sum_nnz, total_nnz, mulout_idxp);
+  add_column_idx(mulout_idxp, merged_total_nnzp,
+                 merged_count, max_idx_bits);
+  auto used_bits = max_bits(merged_count-1);
+  auto max_key_size = ceil_div(max_idx_bits + used_bits, size_t(8));
+  radix_sort_impl(mulout_idxp, total_nnz, max_key_size);
+  std::vector<size_t> retidxtmp;
+  groupby_sum_binary_input(mulout_idxp, total_nnz, retidxtmp, ret.val);
+  std::vector<int> extracted_idx(retidxtmp.size());
+  ret.idx.resize(retidxtmp.size());
+  auto extracted_idxp = extracted_idx.data();
+  extract_column_idx(retidxtmp.data(), extracted_idxp, ret.idx.data(),
+                     retidxtmp.size(), max_idx_bits);
+  auto separated = my_set_separate(extracted_idx);
+  // might be smaller than merged_count if sparse vector is zero
+  auto separated_size = separated.size();
+  auto separatedp = separated.data();
+#pragma _NEC ivdep
+#pragma _NEC vovertake
+#pragma _NEC vob
+  for(size_t i = 0; i < separated_size - 1; i++) {
+    merged_offp[extracted_idxp[separatedp[i]]] =
+      separatedp[i+1] - separatedp[i];
+  }
+  return ret;
+}
+
+template <class T, class I, class O>
+void spgemm_block_esc_binary_input
+(T* lval, I* lidx, O* loff,
+ size_t lnnz, size_t lnum_row, size_t lnum_col,
+ T* rval, I* ridx, O* roff,
+ size_t rnnz, size_t rnum_col,
+ std::vector<T>& retval, std::vector<I>& retidx,
+ std::vector<O>& retoff,
+ size_t merge_column_size) {
+  time_spent t(DEBUG);
+  if(rnnz == 0) return;
+  size_t max_idx_bits = max_bits(lnum_row-1);
+
+  std::vector<O> merged_interim_nnz(rnnz);
+  auto merged_interim_nnzp = merged_interim_nnz.data();
+  std::vector<O> each_column_nnz(rnum_col);
+  auto each_column_nnzp =  each_column_nnz.data();
+  for(size_t rc = 0; rc < rnum_col; rc++) { // rc: right column
+    auto crnt_ridx = ridx + roff[rc];
+    auto crnt_nnz = roff[rc+1] - roff[rc];
+    for(size_t i = 0; i < crnt_nnz; i++) {
+      merged_interim_nnzp[i] = loff[crnt_ridx[i]+1] - loff[crnt_ridx[i]];
+    }
+    for(size_t i = 0; i < crnt_nnz; i++) {
+      each_column_nnzp[rc] += merged_interim_nnzp[i];
+    }
+    merged_interim_nnzp += crnt_nnz;
+  }
+  t.show("count nnz: ");
+  auto num_chunks = ceil_div(rnum_col,merge_column_size);
+  std::vector<sparse_vector<T,I>> out_sparse_vector;
+  out_sparse_vector.reserve(num_chunks);
+  
+  std::vector<O> retofftmp(rnum_col);
+  auto retofftmpp = retofftmp.data();
+  size_t crnt_rc = 0;
+  merged_interim_nnzp = merged_interim_nnz.data();
+  while(true) {
+    size_t merge_size = 0;
+    if(crnt_rc + merge_column_size < rnum_col)
+      merge_size = merge_column_size;
+    else
+      merge_size = rnum_col - crnt_rc;
+    auto crnt_rval = rval + roff[crnt_rc];
+    auto crnt_ridx = ridx + roff[crnt_rc];
+    auto crnt_size = roff[crnt_rc + merge_size] - roff[crnt_rc];
+    if(crnt_size == 0) { // (contiguous) zero sized columns
+      out_sparse_vector.push_back(sparse_vector<T,I>());
+      crnt_rc += merge_size;
+      if(crnt_rc == rnum_col) break;
+      merged_interim_nnzp += crnt_size;
+      each_column_nnzp += merge_size;
+      retofftmpp += merge_size;
+    } else {
+      std::vector<O> pfx_sum_merged_interim_nnz(crnt_size);
+      auto pfx_sum_merged_interim_nnzp = pfx_sum_merged_interim_nnz.data();
+      prefix_sum(merged_interim_nnzp, pfx_sum_merged_interim_nnzp, crnt_size);
+      auto total_interim_nnz = pfx_sum_merged_interim_nnzp[crnt_size - 1];
+      out_sparse_vector.push_back
+        (spgemm_block_esc_binary_input_helper(lval, lidx, loff,
+                                              crnt_rval, crnt_ridx, crnt_size,
+                                              total_interim_nnz,
+                                              merged_interim_nnzp,
+                                              pfx_sum_merged_interim_nnzp,
+                                              each_column_nnzp, merge_size,
+                                              max_idx_bits, retofftmpp));
       crnt_rc += merge_size;
       if(crnt_rc == rnum_col) break;
       merged_interim_nnzp += crnt_size;
@@ -991,6 +1111,14 @@ spgemm(ccs_matrix_local<T,I,O>& left,
                      right.val.size(), right.local_num_col,
                      ret.val, ret.idx, ret.off,
                      merge_column_size);
+  } else if(type == spgemm_type::block_esc_binary_input) {
+    spgemm_block_esc_binary_input
+      (left.val.data(), left.idx.data(), left.off.data(),
+       left.val.size(), left.local_num_row, left.local_num_col,
+       right.val.data(), right.idx.data(), right.off.data(),
+       right.val.size(), right.local_num_col,
+       ret.val, ret.idx, ret.off,
+       merge_column_size);
   } else if(type == spgemm_type::hash) {
     spgemm_hash(left.val.data(), left.idx.data(), left.off.data(),
                 left.val.size(), left.local_num_row, left.local_num_col,
@@ -1034,6 +1162,14 @@ spgemm(crs_matrix_local<T,I,O>& a,
                      a.val.size(), a.local_num_row,
                      ret.val, ret.idx, ret.off,
                      merge_column_size);
+  } else if(type == spgemm_type::block_esc_binary_input) {
+    spgemm_block_esc_binary_input
+      (b.val.data(), b.idx.data(), b.off.data(),
+       b.val.size(), b.local_num_col, b.local_num_row,
+       a.val.data(), a.idx.data(), a.off.data(),
+       a.val.size(), a.local_num_row,
+       ret.val, ret.idx, ret.off,
+       merge_column_size);
   } else if(type == spgemm_type::hash) {
     spgemm_hash(b.val.data(), b.idx.data(), b.off.data(),
                 b.val.size(), b.local_num_col, b.local_num_row,
