@@ -365,33 +365,54 @@ void spmspv_mul_raking(T* mat_valp, I* mat_idxp, O* mat_offp,
       current_sv_val_ridx[i] = sv_valp[svpos_ridx[i]];
     }
   }
+  int valid_vreg[SPMSPV_VLEN];
+  O muloutpos_ridx_vreg[SPMSPV_VLEN];
+  O muloutpos_stop_ridx_vreg[SPMSPV_VLEN];
+  O matpos_ridx_vreg[SPMSPV_VLEN];
+  O matpos_stop_ridx_vreg[SPMSPV_VLEN];
+  size_t svpos_ridx_vreg[SPMSPV_VLEN];
+  T current_sv_val_ridx_vreg[SPMSPV_VLEN];
+#pragma _NEC vreg(valid_vreg)
+#pragma _NEC vreg(muloutpos_ridx_vreg)
+#pragma _NEC vreg(muloutpos_stop_ridx_vreg)
+#pragma _NEC vreg(matpos_ridx_vreg)
+#pragma _NEC vreg(matpos_stop_ridx_vreg)
+#pragma _NEC vreg(svpos_ridx_vreg)
+#pragma _NEC vreg(current_sv_val_ridx_vreg)
+  for(size_t i = 0; i < SPMSPV_VLEN; i++) {
+    valid_vreg[i] = valid[i];
+    muloutpos_ridx_vreg[i] = muloutpos_ridx[i];
+    muloutpos_stop_ridx_vreg[i] = muloutpos_stop_ridx[i];
+    matpos_ridx_vreg[i] = matpos_ridx[i];
+    matpos_stop_ridx_vreg[i] = matpos_stop_ridx[i];
+    svpos_ridx_vreg[i] = svpos_ridx[i];
+    current_sv_val_ridx_vreg[i] = current_sv_val_ridx[i];
+  }
   int anyvalid = true;
   while(anyvalid) {
-    // TODO: create and use vreg version of array
-    // (noraking version is fast enough, though)
 #pragma cdir nodep
 #pragma _NEC ivdep
     for(size_t i = 0; i < SPMSPV_VLEN; i++) {
-      if(valid[i]) {
-        if(muloutpos_ridx[i] == muloutpos_stop_ridx[i]) {
-          valid[i] = false;
-        } else if(matpos_ridx[i] == matpos_stop_ridx[i]) {
-          svpos_ridx[i]++;
-          matpos_ridx[i] = mat_offp[sv_idxp[svpos_ridx[i]]];
-          matpos_stop_ridx[i] = mat_offp[sv_idxp[svpos_ridx[i]]+1];
-          current_sv_val_ridx[i] = sv_valp[svpos_ridx[i]];
+      if(valid_vreg[i]) {
+        if(muloutpos_ridx_vreg[i] == muloutpos_stop_ridx_vreg[i]) {
+          valid_vreg[i] = false;
+        } else if(matpos_ridx_vreg[i] == matpos_stop_ridx_vreg[i]) {
+          svpos_ridx_vreg[i]++;
+          matpos_ridx_vreg[i] = mat_offp[sv_idxp[svpos_ridx_vreg[i]]];
+          matpos_stop_ridx_vreg[i] = mat_offp[sv_idxp[svpos_ridx_vreg[i]]+1];
+          current_sv_val_ridx_vreg[i] = sv_valp[svpos_ridx_vreg[i]];
         } else {
-          mulout_valp[muloutpos_ridx[i]] =
-            mat_valp[matpos_ridx[i]] * current_sv_val_ridx[i];
-          mulout_idxp[muloutpos_ridx[i]] = mat_idxp[matpos_ridx[i]];
-          muloutpos_ridx[i]++;
-          matpos_ridx[i]++;
+          mulout_valp[muloutpos_ridx_vreg[i]] =
+            mat_valp[matpos_ridx_vreg[i]] * current_sv_val_ridx_vreg[i];
+          mulout_idxp[muloutpos_ridx_vreg[i]] = mat_idxp[matpos_ridx_vreg[i]];
+          muloutpos_ridx_vreg[i]++;
+          matpos_ridx_vreg[i]++;
         }
       }
     }
     anyvalid = false;
     for(size_t i = 0; i < SPMSPV_VLEN; i++) {
-      if(valid[i]) anyvalid = true;
+      if(valid_vreg[i]) anyvalid = true;
     }
   }
 }
