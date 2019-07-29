@@ -20,7 +20,9 @@ enum spgemm_type {
   block_esc,
   hash,
   hash_sort,
-  block_esc_binary_input
+  block_esc_binary_input,
+  spa,
+  spa_sort,
 };
 
 template <class T>
@@ -343,7 +345,7 @@ void create_sparse_matrix(std::vector<sparse_vector<T,I>>& sv,
   expressed as ccs matrix, but can be applied to crs matrix
   (A * B  = C <-> B^T * A^T = C^T and  CRS = CCS^T)
   return value is std::vector, because the size is not known beforehand
- */
+*/
 template <class T, class I, class O>
 void spgemm_block_esc(T* lval, I* lidx, O* loff,
                       size_t lnnz, size_t lnum_row, size_t lnum_col,
@@ -1089,6 +1091,278 @@ void spgemm_hash(T* lval, I* lidx, O* loff,
   t.show("time for creating sparse matrix: ");
 }
 
+template <class O>
+size_t max_interm_nnz_per_merged_columns
+(O* interim_nnz_per_columnp, size_t rnum_col, size_t merge_column_size) {
+  auto num_chunks = rnum_col / merge_column_size;
+  std::vector<O> sizes(num_chunks);
+  auto sizesp = sizes.data();
+  for(size_t m = 0; m < merge_column_size; m++) {
+    for(size_t c = 0; c < num_chunks; c++) {
+      sizesp[c] += interim_nnz_per_columnp[merge_column_size * c + m];
+    }
+  }
+  size_t rest_size = 0;
+  for(size_t r = num_chunks * merge_column_size; r < rnum_col; r++) {
+    rest_size += interim_nnz_per_columnp[r];
+  }
+  size_t max = 0;
+  for(size_t i = 0; i < num_chunks; i++) {
+    if(sizes[i] > max) max = sizes[i];
+  }
+  if(max > rest_size) return max; else return rest_size;
+}
+
+template <class T, class I, class O>
+size_t spgemm_spa_make_sparse_vector(I* spa_idx_bufp,
+                                     O stride,
+                                     O* out_ridx,
+                                     O* original_out_ridx,
+                                     T* retvalp,
+                                     I* retidxp,
+                                     T* vp,
+                                     size_t size){
+  if(size == 0) return 0;
+  size_t retsize = 0;
+  O crnt_ridx_vreg[SPGEMM_VLEN];
+#pragma _NEC vreg(crnt_ridx_vreg)
+  for(size_t i = 0; i < SPGEMM_VLEN; i++)
+    crnt_ridx_vreg[i] = original_out_ridx[i];
+  O stop_ridx_vreg[SPGEMM_VLEN];
+#pragma _NEC vreg(stop_ridx_vreg)
+  for(size_t i = 0; i < SPGEMM_VLEN; i++)
+    stop_ridx_vreg[i] = out_ridx[i];
+
+  O min = std::numeric_limits<O>::max();
+  O max = 0;
+  for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+    auto size = out_ridx[i] - original_out_ridx[i];
+    if(min > size) min = size;
+    if(max < size) max = size;
+    retsize += size;
+  }
+  for(size_t m = 0; m < min; m++) {
+#pragma _NEC ivdep
+    for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+      auto idx = spa_idx_bufp[crnt_ridx_vreg[i]];
+      retidxp[i] = idx;
+      retvalp[i] = vp[idx];
+      crnt_ridx_vreg[i]++;
+    }
+    retvalp += SPGEMM_VLEN;
+    retidxp += SPGEMM_VLEN;
+  }
+
+  for(size_t m = 0; m < max - min; m++) {
+    size_t ii = 0;
+#pragma _NEC ivdep
+    for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+      if(crnt_ridx_vreg[i] != stop_ridx_vreg[i]) {
+        auto idx = spa_idx_bufp[crnt_ridx_vreg[i]];
+        retidxp[ii] = idx;
+        retvalp[ii] = vp[idx];
+        crnt_ridx_vreg[i]++;
+        ii++;
+      }
+    }
+    retvalp += ii;
+    retidxp += ii;
+  }
+  return retsize;
+}
+
+template <class T, class I, class O>
+sparse_vector<T,I> spgemm_spa_helper(int* spa_flag_bufp,
+                                     I* spa_idx_bufp,
+                                     O stride,
+                                     T* sparse_vector_val_bufp,
+                                     I* sparse_vector_idx_bufp,
+                                     T* dense_vector_bufp,
+                                     size_t lnum_row,
+                                     T* lval, I* lidx, O* loff,
+                                     T* rval, I* ridx, O* roff,
+                                     size_t crnt_rc,
+                                     size_t merge_size,
+                                     O* merged_offp,
+                                     bool sort) {
+  sparse_vector<T,I> ret;
+  size_t current_sparse_idx = 0;
+  auto sv_valp = rval + roff[crnt_rc];
+  auto sv_idxp = ridx + roff[crnt_rc];
+  O out_ridx[SPGEMM_VLEN];
+  O original_out_ridx[SPGEMM_VLEN];
+  for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+    original_out_ridx[i] = stride * i;
+    out_ridx[i] = original_out_ridx[i];
+  }
+  for(size_t r = 0; r < merge_size; r++) {
+    auto sv_size = roff[crnt_rc + r + 1] - roff[crnt_rc + r];
+    if(sv_size == 0) {
+      continue;
+    } else {
+      O out_ridx_vreg[SPGEMM_VLEN];
+#pragma _NEC vreg(out_ridx_vreg)
+      for(size_t i = 0; i < SPGEMM_VLEN; i++) out_ridx_vreg[i] = out_ridx[i];
+      for(size_t i = 0; i < sv_size; i++) {
+        auto off = loff[sv_idxp[i]];
+        auto crnt_nnz = loff[sv_idxp[i]+1] - off;
+        auto valp = lval + off;
+        auto idxp = lidx + off;
+        auto scal = sv_valp[i];
+        auto each = crnt_nnz / SPGEMM_VLEN;
+        auto rest = crnt_nnz - each * SPGEMM_VLEN;
+        for(size_t e = 0; e < each; e++) {
+#pragma _NEC ivdep
+          for(size_t j = 0; j < SPGEMM_VLEN; j++) {
+            auto idx = idxp[j];
+            dense_vector_bufp[idx] += scal * valp[j];
+            if(spa_flag_bufp[idx] == 0) {
+              spa_flag_bufp[idx] = 1;
+              spa_idx_bufp[out_ridx_vreg[j]++] = idx;
+            }
+          }
+          valp += SPGEMM_VLEN;
+          idxp += SPGEMM_VLEN;
+        }
+#pragma _NEC ivdep
+        for(size_t j = 0; j < rest; j++) {
+          auto idx = idxp[j];
+          dense_vector_bufp[idx] += scal * valp[j];
+          if(spa_flag_bufp[idx] == 0) {
+            spa_flag_bufp[idx] = 1;
+            spa_idx_bufp[out_ridx_vreg[j]++] = idx;
+          }
+        }
+      }
+      for(size_t j = 0; j < SPGEMM_VLEN; j++) out_ridx[j] = out_ridx_vreg[j];
+      auto sparse_size = spgemm_spa_make_sparse_vector
+        (spa_idx_bufp,
+         stride,
+         out_ridx,
+         original_out_ridx,
+         sparse_vector_val_bufp+current_sparse_idx,
+         sparse_vector_idx_bufp+current_sparse_idx,
+         dense_vector_bufp,
+         lnum_row);
+      auto sparse_idx = sparse_vector_idx_bufp + current_sparse_idx;
+#pragma _NEC ivdep
+#pragma _NEC vovertake
+#pragma _NEC vob
+      for(size_t i = 0; i < sparse_size; i++) { // clean up for next loop
+        dense_vector_bufp[sparse_idx[i]] = 0;
+        spa_flag_bufp[sparse_idx[i]] = 0;
+      }
+      for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+        out_ridx[i] = original_out_ridx[i];
+      }
+      merged_offp[r] = sparse_size;
+      current_sparse_idx += sparse_size;
+      sv_valp += sv_size;
+      sv_idxp += sv_size;
+    }
+  }
+  if(sort) {
+    size_t max_idx_bits = max_bits(lnum_row-1);
+    auto tmp_idxp = sparse_vector_idx_bufp;
+    for(size_t i = 0; i < merge_size; i++) {
+      for(size_t j = 0; j < merged_offp[i]; j++) {
+        tmp_idxp[j] += (i << max_idx_bits);
+      }
+      tmp_idxp += merged_offp[i];
+    }
+    auto used_bits = max_bits(merge_size-1);
+    auto max_key_size = ceil_div(max_idx_bits + used_bits, size_t(8));
+    radix_sort_impl(sparse_vector_idx_bufp, sparse_vector_val_bufp,
+                    current_sparse_idx, max_key_size);
+    size_t mask = (static_cast<size_t>(1) << max_idx_bits) - 1;
+    for(size_t i = 0; i < current_sparse_idx; i++) {
+      sparse_vector_idx_bufp[i] &= mask;
+    }
+  }
+  ret.val.resize(current_sparse_idx);
+  ret.idx.resize(current_sparse_idx);
+  auto retvalp = ret.val.data();
+  auto retidxp = ret.idx.data();
+  for(size_t i = 0; i < current_sparse_idx; i++) {
+    retvalp[i] = sparse_vector_val_bufp[i];
+    retidxp[i] = sparse_vector_idx_bufp[i];
+  }
+  return ret;
+}
+
+template <class T, class I, class O>
+void spgemm_spa(T* lval, I* lidx, O* loff,
+                size_t lnnz, size_t lnum_row, size_t lnum_col,
+                T* rval, I* ridx, O* roff,
+                size_t rnnz, size_t rnum_col,
+                std::vector<T>& retval, std::vector<I>& retidx,
+                std::vector<O>& retoff,
+                size_t merge_column_size,
+                bool sort) {
+  time_spent t(DEBUG);
+  if(rnnz == 0) return;
+  std::vector<O> interim_nnz_per_column(rnum_col);
+  std::vector<O> stride_per_column(rnum_col);
+  auto interim_nnz_per_columnp =  interim_nnz_per_column.data();
+  auto stride_per_columnp = stride_per_column.data();
+  for(size_t rc = 0; rc < rnum_col; rc++) { // rc: right column
+    auto crnt_ridx = ridx + roff[rc];
+    auto crnt_nnz = roff[rc+1] - roff[rc];
+    for(size_t i = 0; i < crnt_nnz; i++) {
+      auto nnz_per_scalar = loff[crnt_ridx[i]+1] - loff[crnt_ridx[i]];
+      interim_nnz_per_columnp[rc] += nnz_per_scalar;
+      if(nnz_per_scalar != 0) {
+        stride_per_columnp[rc] += (nnz_per_scalar - 1) / O(SPGEMM_VLEN) + 1;
+      }
+    }
+  }
+  O max_stride_per_column = 0;
+  for(size_t i = 0; i < rnum_col; i++) {
+    if(max_stride_per_column < stride_per_columnp[i])
+      max_stride_per_column = stride_per_columnp[i];
+  }
+  auto sparse_vector_bufsize = max_interm_nnz_per_merged_columns
+    (interim_nnz_per_columnp, rnum_col, merge_column_size);
+  t.show("count nnz: ");
+  std::vector<int> spa_flag_buf(lnum_row);
+  std::vector<I> spa_idx_buf(max_stride_per_column * SPGEMM_VLEN);
+  std::vector<T> sparse_vector_val_buf(sparse_vector_bufsize);
+  std::vector<I> sparse_vector_idx_buf(sparse_vector_bufsize);
+  std::vector<T> dense_vector_buf(lnum_row);
+  
+  auto num_chunks = ceil_div(rnum_col,merge_column_size);
+  std::vector<sparse_vector<T,I>> out_sparse_vector;
+  out_sparse_vector.reserve(num_chunks);
+  
+  std::vector<O> retofftmp(rnum_col);
+  auto retofftmpp = retofftmp.data();
+  size_t crnt_rc = 0;
+  while(true) {
+    size_t merge_size = 0;
+    if(crnt_rc + merge_column_size < rnum_col)
+      merge_size = merge_column_size;
+    else
+      merge_size = rnum_col - crnt_rc;
+    out_sparse_vector.push_back
+      (spgemm_spa_helper(spa_flag_buf.data(),
+                         spa_idx_buf.data(),
+                         max_stride_per_column,
+                         sparse_vector_val_buf.data(),
+                         sparse_vector_idx_buf.data(),
+                         dense_vector_buf.data(),
+                         lnum_row, 
+                         lval, lidx, loff,
+                         rval, ridx, roff, crnt_rc,
+                         merge_size, retofftmpp, sort));
+    crnt_rc += merge_size;
+    if(crnt_rc == rnum_col) break;
+    retofftmpp += merge_size;
+  }
+  t.show("time for creating sparse vectors: ");
+  create_sparse_matrix(out_sparse_vector, retval, retidx, retoff, retofftmp);
+  t.show("time for creating sparse matrix: ");
+}
+
 template <class T, class I, class O>
 ccs_matrix_local<T,I,O>
 spgemm(ccs_matrix_local<T,I,O>& left, 
@@ -1133,6 +1407,20 @@ spgemm(ccs_matrix_local<T,I,O>& left,
                 right.val.size(), right.local_num_col,
                 ret.val, ret.idx, ret.off,
                 merge_column_size, true);
+  } else if(type == spgemm_type::spa) {
+    spgemm_spa(left.val.data(), left.idx.data(), left.off.data(),
+               left.val.size(), left.local_num_row, left.local_num_col,
+               right.val.data(), right.idx.data(), right.off.data(),
+               right.val.size(), right.local_num_col,
+               ret.val, ret.idx, ret.off,
+               merge_column_size, false);
+  } else if(type == spgemm_type::spa_sort) {
+    spgemm_spa(left.val.data(), left.idx.data(), left.off.data(),
+               left.val.size(), left.local_num_row, left.local_num_col,
+               right.val.data(), right.idx.data(), right.off.data(),
+               right.val.size(), right.local_num_col,
+               ret.val, ret.idx, ret.off,
+               merge_column_size, true);
   } else {
     throw std::runtime_error("unknown spgemm_type");
   }
@@ -1184,7 +1472,21 @@ spgemm(crs_matrix_local<T,I,O>& a,
                 a.val.size(), a.local_num_row,
                 ret.val, ret.idx, ret.off,
                 merge_column_size, true);
-  } else {
+  } else if(type == spgemm_type::spa) {
+    spgemm_spa(b.val.data(), b.idx.data(), b.off.data(),
+               b.val.size(), b.local_num_col, b.local_num_row,
+               a.val.data(), a.idx.data(), a.off.data(),
+               a.val.size(), a.local_num_row,
+               ret.val, ret.idx, ret.off,
+               merge_column_size, false);
+  } else if(type == spgemm_type::spa_sort) {
+    spgemm_spa(b.val.data(), b.idx.data(), b.off.data(),
+               b.val.size(), b.local_num_col, b.local_num_row,
+               a.val.data(), a.idx.data(), a.off.data(),
+               a.val.size(), a.local_num_row,
+               ret.val, ret.idx, ret.off,
+               merge_column_size, true);
+  } else{
     throw std::runtime_error("unknown spgemm_type");
   }
   ret.set_local_num(b.local_num_col);
