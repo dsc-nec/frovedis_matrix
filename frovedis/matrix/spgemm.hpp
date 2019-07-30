@@ -234,7 +234,10 @@ void spgemm_esc(T* lval, I* lidx, O* loff,
                 size_t rnnz, size_t rnum_col,
                 std::vector<T>& retval, std::vector<I>& retidx,
                 std::vector<O>& retoff) {
-  if(rnnz == 0) return;
+  if(rnnz == 0) {
+    retoff.resize(rnum_col+1);
+    return;
+  }
   size_t max_idx_bits = max_bits(lnum_row-1);
 
   time_spent t(DEBUG);
@@ -355,7 +358,10 @@ void spgemm_block_esc(T* lval, I* lidx, O* loff,
                       std::vector<O>& retoff,
                       size_t merge_column_size) {
   time_spent t(DEBUG);
-  if(rnnz == 0) return;
+  if(rnnz == 0) {
+    retoff.resize(rnum_col+1);
+    return;
+  }
   size_t max_idx_bits = max_bits(lnum_row-1);
 
   std::vector<O> merged_interim_nnz(rnnz);
@@ -473,7 +479,10 @@ void spgemm_block_esc_binary_input
  std::vector<O>& retoff,
  size_t merge_column_size) {
   time_spent t(DEBUG);
-  if(rnnz == 0) return;
+  if(rnnz == 0) {
+    retoff.resize(rnum_col+1);
+    return;
+  }
   size_t max_idx_bits = max_bits(lnum_row-1);
 
   std::vector<O> merged_interim_nnz(rnnz);
@@ -1024,7 +1033,10 @@ void spgemm_hash(T* lval, I* lidx, O* loff,
                  size_t merge_column_size,
                  bool sort) {
   time_spent t(DEBUG);
-  if(rnnz == 0) return;
+  if(rnnz == 0) {
+    retoff.resize(rnum_col+1);
+    return;
+  }
   size_t max_idx_bits = max_bits(lnum_row-1);
 
   std::vector<O> merged_interim_nnz(rnnz);
@@ -1300,7 +1312,10 @@ void spgemm_spa(T* lval, I* lidx, O* loff,
                 size_t merge_column_size,
                 bool sort) {
   time_spent t(DEBUG);
-  if(rnnz == 0) return;
+  if(rnnz == 0) {
+    retoff.resize(rnum_col+1);
+    return;
+  }
   std::vector<O> interim_nnz_per_column(rnum_col);
   std::vector<O> stride_per_column(rnum_col);
   auto interim_nnz_per_columnp =  interim_nnz_per_column.data();
@@ -1490,6 +1505,190 @@ spgemm(crs_matrix_local<T,I,O>& a,
     throw std::runtime_error("unknown spgemm_type");
   }
   ret.set_local_num(b.local_num_col);
+  return ret;
+}
+
+// left/right is ccs base (so left and right are interchanged)
+template <class I, class O>
+void calc_matrix_separator(I* ridx, O* roff, size_t rnum_col,
+                           O* loff, size_t average_nnz_thr,
+                           std::vector<O>& type1cols,
+                           std::vector<O>& type2cols) {
+  
+  std::vector<O> avg(rnum_col); // integer is OK
+  auto avgp = avg.data();
+  for(size_t rc = 0; rc < rnum_col; rc++) { // rc: right column
+    auto crnt_ridx = ridx + roff[rc];
+    auto crnt_nnz = roff[rc+1] - roff[rc];
+    O interim_nnz_per_column = 0;
+    for(size_t i = 0; i < crnt_nnz; i++) {
+      interim_nnz_per_column += loff[crnt_ridx[i]+1] - loff[crnt_ridx[i]];
+    }
+    if(crnt_nnz == 0) avgp[rc] = 0;
+    else avgp[rc] = interim_nnz_per_column / crnt_nnz;
+  }
+  std::vector<I> idx(rnum_col);
+  auto idxp = idx.data();
+  for(size_t i = 0; i < rnum_col; i++) idxp[i] = i;
+  radix_sort_desc(avg,idx,true); // positive only
+  auto it = std::lower_bound(avg.begin(), avg.end(), average_nnz_thr,
+                             std::greater<O>());
+  auto type1size = it - avg.begin();
+  auto type2size = rnum_col - type1size;
+  type1cols.resize(type1size);
+  type2cols.resize(type2size);
+  auto type1colsp = type1cols.data();
+  auto type2colsp = type2cols.data();
+  for(size_t i = 0; i < type1size; i++) type1colsp[i] = idxp[i];
+  for(size_t i = 0; i < type2size; i++) type2colsp[i] = idxp[type1size + i];
+}
+
+// As for left, part of average nnz is larger than the argument threshold is
+// separated and type1 is used
+template <class T, class I, class O>
+crs_matrix_local<T,I,O>
+spgemm_hybrid(crs_matrix_local<T,I,O>& left, 
+              crs_matrix_local<T,I,O>& right,
+              spgemm_type type1,
+              spgemm_type type2,
+              size_t merge_column_size1,
+              size_t merge_column_size2,
+              size_t average_nnz_thr) {
+  time_spent t(DEBUG);
+  if(left.local_num_row == 0) return crs_matrix_local<T,I,O>();
+  std::vector<O> type1rows, type2rows;
+  calc_matrix_separator(left.idx.data(), left.off.data(),
+                        left.local_num_row,
+                        right.off.data(), average_nnz_thr,
+                        type1rows, type2rows);
+  t.show("calc_matrix_separator: ");
+  auto type1rows_size = type1rows.size();
+  auto type2rows_size = type2rows.size();
+  crs_matrix_local<T,I,O> left_type1(type1rows_size, left.local_num_col);
+  crs_matrix_local<T,I,O> left_type2(type2rows_size, left.local_num_col);
+  size_t type1nnz = 0;
+  auto leftoffp = left.off.data();
+  auto leftidxp = left.idx.data();
+  auto leftvalp = left.val.data();
+  auto type1rowsp = type1rows.data();
+  auto type2rowsp = type2rows.data();
+  for(size_t i = 0; i < type1rows_size; i++) {
+    type1nnz += leftoffp[type1rowsp[i]+1] - leftoffp[type1rowsp[i]];
+  }
+  auto allnnz = left.val.size();
+  auto type2nnz = allnnz - type1nnz;
+  LOG(DEBUG) << "type1 nnz = " << type1nnz
+             << ", type1 nrows = " << type1rows_size
+             << ", type2 nnz = " << type2nnz
+             << ", type2 nrows = " << type2rows_size << std::endl;
+  left_type1.val.resize(type1nnz);
+  left_type1.idx.resize(type1nnz);
+  left_type1.off.resize(type1rows_size + 1);
+  left_type2.val.resize(type2nnz);
+  left_type2.idx.resize(type2nnz);
+  left_type2.off.resize(type2rows_size + 1);
+  auto crnt_type1valp = left_type1.val.data();
+  auto crnt_type1idxp = left_type1.idx.data();
+  auto crnt_type2valp = left_type2.val.data();
+  auto crnt_type2idxp = left_type2.idx.data();
+  std::vector<O> type1offtmp(type1rows_size);
+  std::vector<O> type2offtmp(type2rows_size);
+  auto type1offtmpp = type1offtmp.data();
+  auto type2offtmpp = type2offtmp.data();
+  for(size_t i = 0; i < type1rows_size; i++) {
+    auto off = leftoffp[type1rowsp[i]];
+    auto size = leftoffp[type1rowsp[i]+1] - off;
+    type1offtmpp[i] = size;
+    auto srcvalp = leftvalp + off;
+    auto srcidxp = leftidxp + off;
+    for(size_t j = 0; j < size; j++) {
+      crnt_type1valp[j] = srcvalp[j];
+      crnt_type1idxp[j] = srcidxp[j];
+    }
+    crnt_type1valp += size;
+    crnt_type1idxp += size;
+  }
+  auto type1offp = left_type1.off.data();
+  prefix_sum(type1offtmpp, type1offp+1, type1rows_size);
+  for(size_t i = 0; i < type2rows_size; i++) {
+    auto off = leftoffp[type2rowsp[i]];
+    auto size = leftoffp[type2rowsp[i]+1] - off;
+    type2offtmpp[i] = size;
+    auto srcvalp = leftvalp + off;
+    auto srcidxp = leftidxp + off;
+    for(size_t j = 0; j < size; j++) {
+      crnt_type2valp[j] = srcvalp[j];
+      crnt_type2idxp[j] = srcidxp[j];
+    }
+    crnt_type2valp += size;
+    crnt_type2idxp += size;
+  }
+  auto type2offp = left_type2.off.data();
+  prefix_sum(type2offtmpp, type2offp+1, type2rows_size);
+  t.show("create separated matrix: ");
+
+  auto type1res = spgemm(left_type1, right, type1, merge_column_size1);
+  t.show("type1: ");
+  auto type2res = spgemm(left_type2, right, type2, merge_column_size2);
+  t.show("type2: ");
+
+  auto retnnz = type1res.val.size() + type2res.val.size();
+  crs_matrix_local<T,I,O> ret(left.local_num_row, right.local_num_col);
+  ret.val.resize(retnnz);
+  ret.idx.resize(retnnz);
+  ret.off.resize(left.local_num_row+1);
+  auto retvalp = ret.val.data();
+  auto retidxp = ret.idx.data();
+  auto retoffp = ret.off.data();
+  
+  auto type1resoffp = type1res.off.data();
+  auto type2resoffp = type2res.off.data();
+  std::vector<O> offtmp(left.local_num_row);
+  auto offtmpp = offtmp.data();
+#pragma _NEC ivdep
+#pragma _NEC vovertake
+#pragma _NEC vob
+  for(size_t i = 0; i < type1rows_size; i++) {
+    offtmpp[type1rowsp[i]] = type1resoffp[i+1] - type1resoffp[i];
+  }
+#pragma _NEC ivdep
+#pragma _NEC vovertake
+#pragma _NEC vob
+  for(size_t i = 0; i < type2rows_size; i++) {
+    offtmpp[type2rowsp[i]] = type2resoffp[i+1] - type2resoffp[i];
+  }
+  prefix_sum(offtmpp, retoffp+1, left.local_num_row);
+
+  auto crnt_type1resvalp = type1res.val.data();
+  auto crnt_type1residxp = type1res.idx.data();
+  for(size_t i = 0; i < type1rows_size; i++) {
+    auto off = retoffp[type1rowsp[i]];
+    auto size = offtmpp[type1rowsp[i]];
+    auto dstvalp = retvalp + off;
+    auto dstidxp = retidxp + off;
+    for(size_t j = 0; j < size; j++) {
+      dstvalp[j] = crnt_type1resvalp[j];
+      dstidxp[j] = crnt_type1residxp[j];
+    }
+    crnt_type1resvalp += size;
+    crnt_type1residxp += size;
+  }
+
+  auto crnt_type2resvalp = type2res.val.data();
+  auto crnt_type2residxp = type2res.idx.data();
+  for(size_t i = 0; i < type2rows_size; i++) {
+    auto off = retoffp[type2rowsp[i]];
+    auto size = offtmpp[type2rowsp[i]];
+    auto dstvalp = retvalp + off;
+    auto dstidxp = retidxp + off;
+    for(size_t j = 0; j < size; j++) {
+      dstvalp[j] = crnt_type2resvalp[j];
+      dstidxp[j] = crnt_type2residxp[j];
+    }
+    crnt_type2resvalp += size;
+    crnt_type2residxp += size;
+  }
+  t.show("create ret: ");
   return ret;
 }
 
