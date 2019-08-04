@@ -12,6 +12,7 @@
 #endif
 #define SPGEMM_HASH_TABLE_SIZE_MULT 3
 #define SPGEMM_HASH_SCALAR_THR 1024
+#define SET_DIAG_ZERO_THR 32
 
 namespace frovedis {
 
@@ -60,7 +61,7 @@ void extract_column_idx(size_t* idxtmp, int* extracted, I* idx,
   }
 }
 
-/* modified version of  set_separate at dataframe/set_operations.hpp
+/* modified version of set_separate at dataframe/set_operations.hpp
    copied to avoid dependency... */
 template <class T>
 std::vector<size_t> my_set_separate(const std::vector<T>& key) {
@@ -1689,6 +1690,467 @@ spgemm_hybrid(crs_matrix_local<T,I,O>& left,
     crnt_type2residxp += size;
   }
   t.show("create ret: ");
+  return ret;
+}
+
+template <class T, class I, class O>
+void set_diag_zero_impl_raking(T* valp, I* idxp, O* offp,
+                               size_t num_row, size_t size,
+                               size_t shift = 0, bool sorted = false) {
+  auto each = ceil_div(size, size_t(SPGEMM_VLEN));
+  if(each % 2 == 0) each++;
+  I row_ridx[SPGEMM_VLEN]; // ridx: idx for raking
+#pragma _NEC vreg(row_ridx)
+  int valid[SPGEMM_VLEN];
+//#pragma _NEC vreg(valid) // does not work on 2.3.0
+  for(size_t i = 0; i < SPGEMM_VLEN; i++) valid[i] = true;
+  auto begin_it = offp;
+  auto end_it = offp + num_row;
+  auto current_it = begin_it;
+  row_ridx[0] = 0;
+  size_t ii = 1;
+  for(size_t i = 1; i < SPGEMM_VLEN; i++) {
+    auto it = std::lower_bound(current_it, end_it, each * i);
+    if(it == current_it) continue;
+    else if(it == end_it) break;
+    else {
+      row_ridx[ii++] = it - begin_it;
+      current_it = it;
+    }
+  }
+  for(size_t i = ii; i < SPGEMM_VLEN; i++) {
+    valid[i] = false;
+    row_ridx[i] = num_row;
+  }
+
+  I pos_ridx[SPGEMM_VLEN]; 
+//#pragma _NEC vreg(pos_ridx) // does not work on 2.3.0
+  I pos_stop_ridx[SPGEMM_VLEN]; 
+#pragma _NEC vreg(pos_stop_ridx)
+  for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+    if(valid[i]) pos_ridx[i] = offp[row_ridx[i]];
+    else pos_ridx[i] = size;
+  }
+  for(size_t i = 0; i < SPGEMM_VLEN-1; i++) {
+    if(valid[i]) pos_stop_ridx[i] = pos_ridx[i+1];
+    else pos_stop_ridx[i] = size;
+  }
+  pos_stop_ridx[SPGEMM_VLEN-1] = size;
+
+  I pos_nextrow_ridx[SPGEMM_VLEN];
+#pragma _NEC vreg(pos_nextrow_ridx)
+  for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+    if(valid[i]) pos_nextrow_ridx[i] = offp[row_ridx[i]+1];
+    else pos_nextrow_ridx[i] = size;
+  }
+
+  I diag_ridx[SPGEMM_VLEN];
+#pragma _NEC vreg(diag_ridx)
+  for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+    if(valid[i]) diag_ridx[i] = row_ridx[i] + shift;
+    else diag_ridx[i] = num_row;
+  }
+
+  int anyvalid = true;
+  if(sorted) {
+    while(anyvalid) {
+#pragma cdir nodep
+#pragma _NEC ivdep
+      for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+        if(valid[i]) {
+          if(pos_ridx[i] == pos_stop_ridx[i]) {
+            valid[i] = false;
+          } else if(pos_ridx[i] == pos_nextrow_ridx[i] ||
+                    idxp[pos_ridx[i]] > diag_ridx[i]) {
+            pos_ridx[i] = pos_nextrow_ridx[i];
+            row_ridx[i]++;
+            pos_nextrow_ridx[i] = offp[row_ridx[i]+1];
+            diag_ridx[i] = row_ridx[i] + shift;
+          } else {
+            if(idxp[pos_ridx[i]] == diag_ridx[i]) {
+              valp[pos_ridx[i]] = 0;
+            } 
+            pos_ridx[i]++;
+          }
+        }
+      }
+      anyvalid = false;
+      for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+        if(valid[i]) anyvalid = true;
+      }
+    }
+  } else {
+    while(anyvalid) {
+#pragma cdir nodep
+#pragma _NEC ivdep
+      for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+        if(valid[i]) {
+          if(pos_ridx[i] == pos_stop_ridx[i]) {
+            valid[i] = false;
+          } else if(pos_ridx[i] == pos_nextrow_ridx[i]) {
+            row_ridx[i]++;
+            pos_nextrow_ridx[i] = offp[row_ridx[i]+1];
+            diag_ridx[i] = row_ridx[i] + shift;
+          } else {
+            if(idxp[pos_ridx[i]] == diag_ridx[i]) {
+              valp[pos_ridx[i]] = 0;
+            } 
+            pos_ridx[i]++;
+          }
+        }
+      }
+      anyvalid = false;
+      for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+        if(valid[i]) anyvalid = true;
+      }
+    }
+  }
+}
+
+template <class T, class I, class O>
+void set_diag_zero_impl(T* valp, I* idxp, O* offp,
+                        size_t num_row, size_t size,
+                        size_t shift = 0, bool sorted = false) {
+  if(sorted) {
+    for(size_t r = 0; r < num_row; r++) {
+      size_t pos = offp[r];
+      size_t size = offp[r+1] - offp[r];
+      for(size_t cidx = 0; cidx < size; cidx++) {
+        if(idxp[pos + cidx] > r + shift) continue;
+        else if(idxp[pos + cidx] == r + shift) {
+          valp[pos + cidx] = 0;
+        }
+      }
+    }
+  } else {
+    for(size_t r = 0; r < num_row; r++) {
+      size_t pos = offp[r];
+      size_t size = offp[r+1] - offp[r];
+      for(size_t cidx = 0; cidx < size; cidx++) {
+        if(idxp[pos + cidx] == r + shift) {
+          valp[pos + cidx] = 0;
+        }
+      }
+    }
+  }
+}
+
+template <class T, class I, class O>
+void set_diag_zero(crs_matrix_local<T,I,O>& mat, size_t shift = 0,
+                   bool sorted = false) { // sorted is slower?
+  auto valp = mat.val.data();
+  auto idxp = mat.idx.data();
+  auto offp = mat.off.data();
+  auto num_row = mat.local_num_row;
+  auto size  = mat.val.size();
+  if(size == 0 || num_row == 0) return;
+  if(size / num_row > SET_DIAG_ZERO_THR)
+    set_diag_zero_impl(valp, idxp, offp, num_row, size, shift, sorted);
+  else
+    set_diag_zero_impl_raking(valp, idxp, offp, num_row, size, shift, sorted);
+}
+
+// used for triangle counting
+// diag is not extracted currently
+template <class T, class I, class O>
+void separate_upper_lower(crs_matrix_local<T,I,O>& mat,
+                          crs_matrix_local<T,I,O>& upper,
+                          crs_matrix_local<T,I,O>& lower) {
+  auto num_row = mat.local_num_row;
+  auto num_col = mat.local_num_col;
+  upper.local_num_row = num_row;
+  upper.local_num_col = num_col;
+  lower.local_num_row = num_row;
+  lower.local_num_col = num_col;
+  auto matnnz = mat.val.size();
+  std::vector<T> upperval(matnnz);
+  std::vector<I> upperidx(matnnz);
+  std::vector<O> upperoff(num_row); // only size; prefix sum later
+  auto uppervalp = upperval.data();
+  auto upperidxp = upperidx.data();
+  auto upperoffp = upperoff.data();
+  size_t uppernnz = 0;
+  std::vector<T> lowerval(matnnz);
+  std::vector<I> loweridx(matnnz);
+  std::vector<O> loweroff(num_row);
+  auto lowervalp = lowerval.data();
+  auto loweridxp = loweridx.data();
+  auto loweroffp = loweroff.data();
+  size_t lowernnz = 0;
+  auto matvalp = mat.val.data();
+  auto matidxp = mat.idx.data();
+  auto matoffp = mat.off.data();
+  for(size_t r = 0; r < num_row; r++) {
+    auto off = matoffp[r];
+    auto size = matoffp[r+1] - off;
+    auto crntmatval = matvalp + off;
+    auto crntmatidx = matidxp + off;
+    size_t diag_pos = 0;
+    for(diag_pos = 0; diag_pos < size; diag_pos++) {
+      if(crntmatidx[diag_pos] >= r) break;
+    }
+    size_t lower_stop = diag_pos; // exclusive
+    auto crntlowervalp = lowervalp + lowernnz;
+    auto crntloweridxp = loweridxp + lowernnz;
+    for(size_t i = 0; i < lower_stop; i++) {
+      crntlowervalp[i] = crntmatval[i];
+      crntloweridxp[i] = crntmatidx[i];
+    }
+    loweroffp[r] = lower_stop;
+    lowernnz += lower_stop;
+    size_t upper_start = crntmatidx[diag_pos] == r ? diag_pos + 1 : diag_pos;
+    size_t upper_size = size - upper_start; // size >= upper_start
+    auto crntuppervalp = uppervalp + uppernnz;
+    auto crntupperidxp = upperidxp + uppernnz;
+    crntmatval = matvalp + off + upper_start;
+    crntmatidx = matidxp + off + upper_start;
+    for(size_t i = 0; i < upper_size; i++) {
+      crntuppervalp[i] = crntmatval[i];
+      crntupperidxp[i] = crntmatidx[i];
+    }
+    upperoffp[r] = upper_size;
+    uppernnz += upper_size;
+  }
+  upper.val.resize(uppernnz);
+  upper.idx.resize(uppernnz);
+  upper.off.resize(num_row+1);
+  auto retuppervalp = upper.val.data();
+  auto retupperidxp = upper.idx.data();
+  auto retupperoffp = upper.off.data();
+  for(size_t i = 0; i < uppernnz; i++) {
+    retuppervalp[i] = uppervalp[i];
+    retupperidxp[i] = upperidxp[i];
+  }
+  prefix_sum(upperoffp, retupperoffp+1, num_row);
+  lower.val.resize(lowernnz);
+  lower.idx.resize(lowernnz);
+  lower.off.resize(num_row+1);
+  auto retlowervalp = lower.val.data();
+  auto retloweridxp = lower.idx.data();
+  auto retloweroffp = lower.off.data();
+  for(size_t i = 0; i < lowernnz; i++) {
+    retlowervalp[i] = lowervalp[i];
+    retloweridxp[i] = loweridxp[i];
+  }
+  prefix_sum(loweroffp, retloweroffp+1, num_row);
+}
+
+// mostly set_intersection
+template <class T>
+void elementwise_product_helper(size_t* leftidx, size_t* rightidx,
+                                T* leftval, T* rightval,
+                                size_t left_size, size_t right_size,
+                                size_t* outidx, T* outval,
+                                std::vector<size_t>& retidx,
+                                std::vector<T>& retval) {
+  int valid[SPGEMM_VLEN];
+  for(int i = 0; i < SPGEMM_VLEN; i++) valid[i] = true;
+  size_t each = ceil_div(left_size, size_t(SPGEMM_VLEN));
+  if(each % 2 == 0) each++; // we assume each != 0
+  size_t left_ridx[SPGEMM_VLEN];
+  size_t right_ridx[SPGEMM_VLEN];
+  size_t left_ridx_stop[SPGEMM_VLEN];
+  size_t right_ridx_stop[SPGEMM_VLEN];
+  size_t out_ridx[SPGEMM_VLEN];
+  size_t out_ridx_save[SPGEMM_VLEN];
+  for(int i = 0; i < SPGEMM_VLEN; i++) {
+    size_t pos = each * i;
+    if(pos < left_size) {
+      left_ridx[i] = pos;
+      out_ridx[i] = pos;
+      out_ridx_save[i] = pos;
+    } else {
+      valid[i] = false;
+      left_ridx[i] = left_size;
+      out_ridx[i] = left_size;
+      out_ridx_save[i] = left_size;
+    }
+  }
+  for(int i = 0; i < SPGEMM_VLEN; i++) {
+    if(valid[i]) {
+      auto it = std::lower_bound(rightidx, rightidx + right_size,
+                                 leftidx[left_ridx[i]]);
+      if(it != rightidx + right_size) {
+        right_ridx[i] = it - rightidx;
+      } else {
+        valid[i] = false;
+        right_ridx[i] = right_size;
+      }
+    } else {
+      right_ridx[i] = right_size;
+    }
+  }
+  for(int i = 0; i < SPGEMM_VLEN-1; i++) {
+    if(valid[i]) {
+      auto it = std::upper_bound(rightidx, rightidx + right_size,
+                                 leftidx[left_ridx[i+1]-1]);
+      if(it != rightidx + right_size) {
+        right_ridx_stop[i] = it - rightidx;
+      } else {
+        right_ridx_stop[i] = right_size;
+      }
+    } else {
+      right_ridx_stop[i] = right_size;
+    }
+  }
+  if(valid[SPGEMM_VLEN-1]) {
+    auto it = std::upper_bound(rightidx, rightidx + right_size,
+                               leftidx[left_size-1]);
+    if(it != rightidx + right_size) {
+      right_ridx_stop[SPGEMM_VLEN-1] = it - rightidx;
+    } else {
+      valid[SPGEMM_VLEN-1] = false;
+      right_ridx_stop[SPGEMM_VLEN-1] = right_size;
+    }
+  } else {
+    right_ridx_stop[SPGEMM_VLEN-1] = right_size;
+  }
+  for(int i = 0; i < SPGEMM_VLEN - 1; i++) {
+    left_ridx_stop[i] = left_ridx[i + 1];
+  }
+  left_ridx_stop[SPGEMM_VLEN-1] = left_size;
+  right_ridx_stop[SPGEMM_VLEN-1] = right_size;
+  for(int i = 0; i < SPGEMM_VLEN; i++) {
+    if(right_ridx[i] == right_ridx_stop[i]) valid[i] = false;
+  }
+
+  while(1) {
+    size_t leftelm[SPGEMM_VLEN];
+    size_t rightelm[SPGEMM_VLEN];
+    // TODO: use vreg
+#pragma cdir nodep
+#pragma _NEC ivdep
+    for(int i = 0; i < SPGEMM_VLEN; i++) {
+      if(valid[i]) {
+        leftelm[i] = leftidx[left_ridx[i]];
+        rightelm[i] = rightidx[right_ridx[i]];
+        int eq = leftelm[i] == rightelm[i];
+        int lt = leftelm[i] < rightelm[i];
+        if(eq) {
+          outidx[out_ridx[i]] = leftelm[i];
+          outval[out_ridx[i]] =
+            leftval[left_ridx[i]] * rightval[right_ridx[i]];
+          out_ridx[i]++;
+        }
+        if(eq || lt) {
+          left_ridx[i]++;
+        }
+        if(eq || !lt) {
+          right_ridx[i]++;
+        }
+        if(left_ridx[i] == left_ridx_stop[i] ||
+           right_ridx[i] == right_ridx_stop[i]) {
+          valid[i] = false;
+        }
+      }
+    }
+    int any_valid = false;
+    for(int i = 0; i < SPGEMM_VLEN; i++) {
+      if(valid[i]) any_valid = true;
+    }
+    if(any_valid == false) break;
+  }
+  size_t total = 0;
+  for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+    total += out_ridx[i] - out_ridx_save[i];
+  }
+  retidx.resize(total);
+  retval.resize(total);
+  auto retidxp = retidx.data();
+  auto retvalp = retval.data();
+  size_t current = 0;
+  for(size_t i = 0; i < SPGEMM_VLEN; i++) {
+#pragma cdir nodep
+#pragma _NEC ivdep
+    for(size_t j = 0; j < out_ridx[i] - out_ridx_save[i]; j++) {
+      retidxp[current + j] = outidx[out_ridx_save[i] + j];
+      retvalp[current + j] = outval[out_ridx_save[i] + j];
+    }
+    current += out_ridx[i] - out_ridx_save[i];
+  }
+}
+
+// used for triangle counting
+// it is assumed that sparsity pattern is different
+template <class T, class I, class O>
+crs_matrix_local<T,I,O> elementwise_product(crs_matrix_local<T,I,O>& left,
+                                            crs_matrix_local<T,I,O>& right) {
+  auto num_row = left.local_num_row;
+  auto num_col = left.local_num_col;
+  if(num_row != right.local_num_row || num_col != right.local_num_col)
+    throw std::runtime_error("elementwise_product: size mismatch");
+  crs_matrix_local<T,I,O> ret(num_row, num_col);
+  auto leftnnz = left.val.size();
+  auto leftvalp = left.val.data();
+  auto leftidxp = left.idx.data();
+  auto leftoffp = left.off.data();
+  auto rightnnz = right.val.size();
+  auto rightvalp = right.val.data();
+  auto rightidxp = right.idx.data();
+  auto rightoffp = right.off.data();
+  if(leftnnz == 0 || rightnnz == 0) return ret;
+  
+  std::vector<size_t> leftidxtmp(leftnnz);
+  auto leftidxtmpp = leftidxtmp.data();
+  std::vector<size_t> rightidxtmp(rightnnz);
+  auto rightidxtmpp = rightidxtmp.data();
+
+  auto max_idx_bits = max_bits(num_col-1);
+
+  for(size_t r = 0; r < num_row; r++) {
+    auto off = leftoffp[r];
+    auto size = leftoffp[r+1] - off;
+    auto crnt_leftidxtmp = leftidxtmpp + off;
+    auto crnt_leftidx = leftidxp + off;
+    for(size_t i = 0; i < size; i++) {
+      crnt_leftidxtmp[i] = crnt_leftidx[i] + (r << max_idx_bits);
+    }
+  }
+
+  for(size_t r = 0; r < num_row; r++) {
+    auto off = rightoffp[r];
+    auto size = rightoffp[r+1] - off;
+    auto crnt_rightidxtmp = rightidxtmpp + off;
+    auto crnt_rightidx = rightidxp + off;
+    for(size_t i = 0; i < size; i++) {
+      crnt_rightidxtmp[i] = crnt_rightidx[i] + (r << max_idx_bits);
+    }
+  }
+
+  auto tmpretnnz = leftnnz > rightnnz ? leftnnz : rightnnz;
+  std::vector<size_t> tmpretidx(tmpretnnz);
+  auto tmpretidxp = tmpretidx.data();
+  std::vector<T> tmpretval(tmpretnnz);
+  auto tmpretvalp = tmpretval.data();
+  std::vector<size_t> tmpretidx2;
+  elementwise_product_helper(leftidxtmpp, rightidxtmpp,
+                             leftvalp, rightvalp,
+                             leftnnz, rightnnz,
+                             tmpretidxp, tmpretvalp,
+                             tmpretidx2, ret.val);
+  auto retsize = tmpretidx2.size();
+  ret.idx.resize(retsize);
+  std::vector<int> extracted_idx(retsize);
+  auto extracted_idxp = extracted_idx.data();
+  extract_column_idx(tmpretidx2.data(), extracted_idxp, ret.idx.data(),
+                    retsize, max_idx_bits);
+  auto separated = my_set_separate(extracted_idx);
+  // might be smaller than num_row if sparse vector is zero
+  auto separated_size = separated.size();
+  auto separatedp = separated.data();
+  std::vector<O> merged_off(num_row);
+  auto merged_offp = merged_off.data();
+#pragma _NEC ivdep
+#pragma _NEC vovertake
+#pragma _NEC vob
+  for(size_t i = 0; i < separated_size - 1; i++) {
+    merged_offp[extracted_idxp[separatedp[i]]] =
+      separatedp[i+1] - separatedp[i];
+  }
+  ret.off.resize(num_row+1);
+  auto retoffp = ret.off.data();
+  prefix_sum(merged_offp, retoffp+1, num_row);
+
   return ret;
 }
 
