@@ -49,4 +49,16 @@ int main() {
   set_diag_zero(crs);
   cout << "set zero to diagonal" << endl;
   cout << crs << endl;
+
+  crs_matrix_local<float,int> u, l;
+  separate_upper_lower(crs, u, l);
+  cout << "separate upper and lower" << endl;
+  u.debug_pretty_print();
+  cout << endl;
+  l.debug_pretty_print();
+  cout << endl;
+
+  auto ep = elementwise_product(crs,crs);
+  cout << "elementwise product (diag is set zero)" << endl;
+  cout << ep << endl;
 }
