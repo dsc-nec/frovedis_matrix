@@ -1899,7 +1899,7 @@ void separate_upper_lower(crs_matrix_local<T,I,O>& mat,
     loweroffp[r] = lower_stop;
     lowernnz += lower_stop;
     size_t upper_start = crntmatidx[diag_pos] == r ? diag_pos + 1 : diag_pos;
-    size_t upper_size = size - upper_start; // size >= upper_start
+    size_t upper_size = size > upper_start ? size - upper_start : 0;
     auto crntuppervalp = uppervalp + uppernnz;
     auto crntupperidxp = upperidxp + uppernnz;
     crntmatval = matvalp + off + upper_start;
@@ -1966,6 +1966,10 @@ void elementwise_product_helper(size_t* leftidx, size_t* rightidx,
       out_ridx_save[i] = left_size;
     }
   }
+  for(int i = 0; i < SPGEMM_VLEN - 1; i++) {
+    left_ridx_stop[i] = left_ridx[i + 1];
+  }
+  left_ridx_stop[SPGEMM_VLEN-1] = left_size;
   for(int i = 0; i < SPGEMM_VLEN; i++) {
     if(valid[i]) {
       auto it = std::lower_bound(rightidx, rightidx + right_size,
@@ -1980,17 +1984,18 @@ void elementwise_product_helper(size_t* leftidx, size_t* rightidx,
       right_ridx[i] = right_size;
     }
   }
+  for(int i = 0; i < SPGEMM_VLEN - 1; i++) {
+    right_ridx_stop[i] = right_ridx[i + 1];
+  }
+  right_ridx_stop[SPGEMM_VLEN-1] = right_size;
+  // search for better stop
   for(int i = 0; i < SPGEMM_VLEN-1; i++) {
     if(valid[i]) {
       auto it = std::upper_bound(rightidx, rightidx + right_size,
                                  leftidx[left_ridx[i+1]-1]);
       if(it != rightidx + right_size) {
         right_ridx_stop[i] = it - rightidx;
-      } else {
-        right_ridx_stop[i] = right_size;
       }
-    } else {
-      right_ridx_stop[i] = right_size;
     }
   }
   if(valid[SPGEMM_VLEN-1]) {
@@ -1998,18 +2003,8 @@ void elementwise_product_helper(size_t* leftidx, size_t* rightidx,
                                leftidx[left_size-1]);
     if(it != rightidx + right_size) {
       right_ridx_stop[SPGEMM_VLEN-1] = it - rightidx;
-    } else {
-      valid[SPGEMM_VLEN-1] = false;
-      right_ridx_stop[SPGEMM_VLEN-1] = right_size;
     }
-  } else {
-    right_ridx_stop[SPGEMM_VLEN-1] = right_size;
   }
-  for(int i = 0; i < SPGEMM_VLEN - 1; i++) {
-    left_ridx_stop[i] = left_ridx[i + 1];
-  }
-  left_ridx_stop[SPGEMM_VLEN-1] = left_size;
-  right_ridx_stop[SPGEMM_VLEN-1] = right_size;
   for(int i = 0; i < SPGEMM_VLEN; i++) {
     if(right_ridx[i] == right_ridx_stop[i]) valid[i] = false;
   }
