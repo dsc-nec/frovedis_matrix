@@ -1085,13 +1085,17 @@ void spgemm_hash(T* lval, I* lidx, O* loff,
       auto pfx_sum_merged_interim_nnzp = pfx_sum_merged_interim_nnz.data();
       prefix_sum(merged_interim_nnzp, pfx_sum_merged_interim_nnzp, crnt_size);
       auto total_interim_nnz = pfx_sum_merged_interim_nnzp[crnt_size - 1];
-      out_sparse_vector.push_back
-        (spgemm_hash_helper(lval, lidx, loff,
-                            crnt_rval, crnt_ridx, crnt_size,
-                            total_interim_nnz, merged_interim_nnzp,
-                            pfx_sum_merged_interim_nnzp,
-                            each_column_nnzp, merge_size,
-                            max_idx_bits, retofftmpp, sort));
+      if(total_interim_nnz == 0) { // zero size cannot be handled
+        out_sparse_vector.push_back(sparse_vector<T,I>());
+      } else {
+        out_sparse_vector.push_back
+          (spgemm_hash_helper(lval, lidx, loff,
+                              crnt_rval, crnt_ridx, crnt_size,
+                              total_interim_nnz, merged_interim_nnzp,
+                              pfx_sum_merged_interim_nnzp,
+                              each_column_nnzp, merge_size,
+                              max_idx_bits, retofftmpp, sort));
+      }
       crnt_rc += merge_size;
       if(crnt_rc == rnum_col) break;
       merged_interim_nnzp += crnt_size;
