@@ -4,6 +4,7 @@
 #include "ccs_matrix.hpp"
 #include "spmspv.hpp"
 #include <limits>
+#include <functional>
 
 #ifdef __ve__
 #define SPGEMM_VLEN 256
