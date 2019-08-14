@@ -1,11 +1,11 @@
 include ../Makefile.in.ve
 
-TARGETS := evalspmv evalspmm
+TARGETS := evalspmv evalspmm evalspgemm evalspgemm_mpi
 
 LIBS := -L../core -lfrovedis_core -L../matrix -lfrovedis_matrix
 INCLUDES := -I../.. -I.
 
-CXXFLAGS := ${CXXFLAGS_COMMON} ${INCLUDES} -fopenmp -ftrace
+CXXFLAGS := ${CXXFLAGS_COMMON} ${INCLUDES} -fopenmp
 
 all: ${TARGETS}
 
@@ -14,6 +14,12 @@ evalspmv: evalspmv.o
 
 evalspmm: evalspmm.o
 	${CXX} ${CXXFLAGS} -o evalspmm evalspmm.o ${LIBS}
+
+evalspgemm: evalspgemm.o
+	${CXX} ${CXXFLAGS} -o evalspgemm evalspgemm.o ${LIBS}
+
+evalspgemm_mpi: evalspgemm_mpi.cc
+	${MPICXX} ${CXXFLAGS} -o evalspgemm_mpi evalspgemm_mpi.cc -ftrace ${LIBS}
 
 clean:
 	rm -fr ${TO_CLEAN} ${TARGETS}

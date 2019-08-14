@@ -1,6 +1,6 @@
 CXXFLAGS_COMMON := -fPIC -g -Wall -O3 -std=c++11 -Wno-unknown-pragmas -Wno-sign-compare -pthread
 CXX = g++
-
+MPICXX := mpic++
 # check the library name of your distribution
 LIBS_COMMON := 
 
