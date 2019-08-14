@@ -1,0 +1,19 @@
+include ../Makefile.in.x86
+
+TARGETS := evalspgemm_mpi_mkl
+
+LIBS := -L../core -lfrovedis_core -L../matrix -lfrovedis_matrix
+INCLUDES := -I../.. -I.
+
+CXXFLAGS := ${CXXFLAGS_COMMON} ${INCLUDES}
+
+all: ${TARGETS}
+
+evalspgemm_mpi_mkl: evalspgemm_mpi_mkl.o
+	icpc ${CXXFLAGS} `mpic++ -showme:link` -mkl=sequential -o evalspgemm_mpi_mkl evalspgemm_mpi_mkl.o ${LIBS}
+
+evalspgemm_mpi_mkl.o: evalspgemm_mpi_mkl.cc
+	icpc ${CXXFLAGS} -c `mpic++ -showme:compile` -mkl=sequential -o evalspgemm_mpi_mkl.o evalspgemm_mpi_mkl.cc
+	
+clean:
+	rm -fr ${TO_CLEAN} ${TARGETS} tmp
