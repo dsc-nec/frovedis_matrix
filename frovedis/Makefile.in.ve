@@ -4,7 +4,7 @@ NLC_INC := /opt/nec/ve/nlc/${NLC_VERSION}/include
 NLC_LIB := /opt/nec/ve/nlc/${NLC_VERSION}/lib
 
 CXX := nc++
-CXX := mpinc++
+MPICXX := mpinc++
 AR := nar
 CXXFLAGS_COMMON := -O4 -fno-defer-inline-template-instantiation -I${NLC_INC}
 
