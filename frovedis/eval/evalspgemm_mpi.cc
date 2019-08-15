@@ -8,6 +8,7 @@ using namespace std;
 // here we assume that val/idx/off is less than 2GB!
 template <class T, class I, class O>
 void broadcast_crs_matrix(crs_matrix_local<T,I,O>& crs) {
+  time_spent t;
   int rank, size;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
@@ -45,13 +46,12 @@ int main(int argc, char* argv[]){
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
   crs_matrix_local<float,int> crs;
-  if(rank == 0) {
-    crs = make_crs_matrix_local_loadbinary<float,int>(argv[1]);
-  }
+  crs = make_crs_matrix_local_loadbinary<float,int>(argv[1]);
+  MPI_Barrier(MPI_COMM_WORLD);
   if(rank == 0) t.show("load: ");
-  broadcast_crs_matrix(crs);
   auto mypart = separate_crs_matrix_for_spgemm_mpi(crs,crs);
-  if(rank == 0) t.show("broadcast & separate matrix: ");
+  MPI_Barrier(MPI_COMM_WORLD);
+  if(rank == 0) t.show("separate matrix: ");
   int num_merge = atoi(argv[2]);
   int num_split = atoi(argv[3]);
   MPI_Barrier(MPI_COMM_WORLD);
