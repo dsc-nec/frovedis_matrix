@@ -2154,5 +2154,77 @@ crs_matrix_local<T,I,O> elementwise_product(crs_matrix_local<T,I,O>& left,
   return ret;
 }
 
+// separate left according to interim nnz
+template <class T, class I, class O>
+std::vector<crs_matrix_local<T,I,O>> 
+separate_crs_matrix_for_spgemm(crs_matrix_local<T,I,O>& left,
+                               crs_matrix_local<T,I,O>& right,
+                               size_t separate_size) {
+  if(left.local_num_col != right.local_num_row) 
+    throw std::runtime_error
+      ("separate_crs_matrix_for_spgemm: matrix size mismatch");
+
+  auto lnum_row = left.local_num_row;
+  auto lidx = left.idx.data();
+  auto loff = left.off.data();
+  auto ridx = right.idx.data();
+  auto roff = right.off.data();
+  auto lnnz = left.idx.size();
+  std::vector<O> interim_nnz_per_column(lnum_row);
+  auto interim_nnz_per_columnp = interim_nnz_per_column.data();
+  for(size_t lr = 0; lr < lnum_row; lr++) { // lr: left row
+    auto crnt_lidx = lidx + loff[lr];
+    auto crnt_nnz = loff[lr+1] - loff[lr];
+    for(size_t i = 0; i < crnt_nnz; i++) {
+      interim_nnz_per_columnp[lr] += roff[crnt_lidx[i]+1] - roff[crnt_lidx[i]];
+    }
+  }
+  std::vector<O> pfx_interim_nnz_per_column(lnum_row+1);
+  prefix_sum(interim_nnz_per_columnp, pfx_interim_nnz_per_column.data()+1,
+             lnum_row);
+
+  size_t total = pfx_interim_nnz_per_column[lnum_row];
+  size_t each_size = frovedis::ceil_div(total, separate_size);
+  std::vector<size_t> divide_row(separate_size+1);
+  for(size_t i = 0; i < separate_size + 1; i++) {
+    auto it = std::lower_bound(pfx_interim_nnz_per_column.begin(),
+                               pfx_interim_nnz_per_column.end(),
+                               each_size * i);
+    if(it != pfx_interim_nnz_per_column.end()) {
+      divide_row[i] = it - pfx_interim_nnz_per_column.begin();
+    } else {
+      divide_row[i] = lnum_row;
+    }
+  }
+  std::vector<crs_matrix_local<T,I,O>> vret(separate_size);
+  T* leftvalp = left.val.data();
+  I* leftidxp = left.idx.data();
+  O* leftoffp = left.off.data();
+  for(size_t i = 0; i < separate_size; i++) {
+    vret[i].local_num_col = left.local_num_col;
+    size_t start_row = divide_row[i];
+    size_t end_row = divide_row[i+1];
+    vret[i].local_num_row = end_row - start_row;
+    size_t start_off = leftoffp[start_row];
+    size_t end_off = leftoffp[end_row];
+    size_t off_size = end_off - start_off;
+    vret[i].val.resize(off_size);
+    vret[i].idx.resize(off_size);
+    vret[i].off.resize(end_row - start_row + 1); // off[0] == 0 by ctor
+    T* valp = &vret[i].val[0];
+    I* idxp = &vret[i].idx[0];
+    O* offp = &vret[i].off[0];
+    for(size_t j = 0; j < off_size; j++) {
+      valp[j] = leftvalp[j + start_off];
+      idxp[j] = leftidxp[j + start_off];
+    }
+    for(size_t j = 0; j < end_row - start_row; j++) {
+      offp[j+1] = offp[j] + (leftoffp[start_row + j + 1] -
+                             leftoffp[start_row + j]);
+    }
+  }
+  return vret;
+}
+
 }
 #endif
