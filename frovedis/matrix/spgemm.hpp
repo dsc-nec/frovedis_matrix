@@ -2167,9 +2167,7 @@ separate_crs_matrix_for_spgemm(crs_matrix_local<T,I,O>& left,
   auto lnum_row = left.local_num_row;
   auto lidx = left.idx.data();
   auto loff = left.off.data();
-  auto ridx = right.idx.data();
   auto roff = right.off.data();
-  auto lnnz = left.idx.size();
   std::vector<O> interim_nnz_per_column(lnum_row);
   auto interim_nnz_per_columnp = interim_nnz_per_column.data();
   for(size_t lr = 0; lr < lnum_row; lr++) { // lr: left row
@@ -2196,6 +2194,7 @@ separate_crs_matrix_for_spgemm(crs_matrix_local<T,I,O>& left,
       divide_row[i] = lnum_row;
     }
   }
+
   std::vector<crs_matrix_local<T,I,O>> vret(separate_size);
   T* leftvalp = left.val.data();
   I* leftidxp = left.idx.data();
@@ -2224,6 +2223,121 @@ separate_crs_matrix_for_spgemm(crs_matrix_local<T,I,O>& left,
     }
   }
   return vret;
+}
+
+// assume that left and right is broadcasted,
+// returns only my part of left
+template <class T, class I, class O>
+crs_matrix_local<T,I,O>
+separate_crs_matrix_for_spgemm_mpi(crs_matrix_local<T,I,O>& left,
+                                   crs_matrix_local<T,I,O>& right) {
+  if(left.local_num_col != right.local_num_row) 
+    throw std::runtime_error
+      ("separate_crs_matrix_for_spgemm: matrix size mismatch");
+
+  int size, rank;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+  // first, separate according to nnz for interm nnz calculation
+  size_t total_nnz = left.off[left.off.size() - 1];
+  size_t each_size_nnz = frovedis::ceil_div(total_nnz, size_t(size));
+  std::vector<size_t> divide_row_nnz(size+1);
+  for(size_t i = 0; i < size + 1; i++) {
+    auto it = std::lower_bound(left.off.begin(), left.off.end(),
+                               each_size_nnz * i);
+    if(it != left.off.end()) {
+      divide_row_nnz[i] = it - left.off.begin();
+    } else {
+      divide_row_nnz[i] = left.local_num_row;
+    }
+  }
+  auto my_row_start = divide_row_nnz[rank];
+  auto my_row_end = divide_row_nnz[rank+1];
+  auto my_num_row = my_row_end - my_row_start;
+  auto lidx = left.idx.data();
+  auto loff = left.off.data();
+  auto roff = right.off.data();
+  std::vector<O> interim_nnz_per_column(my_num_row);
+  auto interim_nnz_per_columnp = interim_nnz_per_column.data();
+  for(size_t j = 0; j < my_num_row; j++) { 
+    auto lr = my_row_start + j; // lr: left row
+    auto crnt_lidx = lidx + loff[lr];
+    auto crnt_nnz = loff[lr+1] - loff[lr];
+    for(size_t i = 0; i < crnt_nnz; i++) {
+      interim_nnz_per_columnp[j] += roff[crnt_lidx[i]+1] - roff[crnt_lidx[i]];
+    }
+  }
+  std::vector<O> pfx_interim_nnz_per_column_local(my_num_row);
+  prefix_sum(interim_nnz_per_columnp, pfx_interim_nnz_per_column_local.data(),
+             my_num_row);
+
+  auto lnum_row = left.local_num_row;
+  std::vector<O> pfx_interim_nnz_per_column(lnum_row+1);
+
+  std::vector<int> recvcounts(size);
+  std::vector<int> displs(size);
+  auto recvcountsp = recvcounts.data();
+  auto displsp = displs.data();
+  auto divide_row_nnzp = divide_row_nnz.data();
+  for(size_t i = 0; i < size; i++)
+    recvcountsp[i] = (divide_row_nnzp[i+1] - divide_row_nnzp[i]) * sizeof(O);
+  for(size_t i = 0; i < size-1; i++)
+    displsp[i+1] = displsp[i] + recvcountsp[i];
+  MPI_Allgatherv(pfx_interim_nnz_per_column_local.data(),
+                 my_num_row * sizeof(O), MPI_CHAR,
+                 pfx_interim_nnz_per_column.data()+1,
+                 recvcountsp, displsp, MPI_CHAR, MPI_COMM_WORLD);
+  
+  auto pfx_interim_nnz_per_columnp = pfx_interim_nnz_per_column.data();
+  for(size_t i = 1; i < size; i++) {
+    auto to_add = pfx_interim_nnz_per_columnp[divide_row_nnzp[i]];
+    for(size_t j = divide_row_nnzp[i]; j < divide_row_nnzp[i+1]; j++) {
+      pfx_interim_nnz_per_columnp[j+1] += to_add;
+    }
+  }
+
+  size_t total = pfx_interim_nnz_per_column[lnum_row];
+  size_t each_size = frovedis::ceil_div(total, size_t(size));
+  std::vector<size_t> divide_row(size+1);
+  for(size_t i = 0; i < size + 1; i++) {
+    auto it = std::lower_bound(pfx_interim_nnz_per_column.begin(),
+                               pfx_interim_nnz_per_column.end(),
+                               each_size * i);
+    if(it != pfx_interim_nnz_per_column.end()) {
+      divide_row[i] = it - pfx_interim_nnz_per_column.begin();
+    } else {
+      divide_row[i] = lnum_row;
+    }
+  }
+  crs_matrix_local<T,I,O> ret;
+  T* leftvalp = left.val.data();
+  I* leftidxp = left.idx.data();
+  O* leftoffp = left.off.data();
+
+  ret.local_num_col = left.local_num_col;
+  size_t start_row = divide_row[rank];
+  size_t end_row = divide_row[rank+1];
+  ret.local_num_row = end_row - start_row;
+  size_t start_off = leftoffp[start_row];
+  size_t end_off = leftoffp[end_row];
+  size_t off_size = end_off - start_off;
+  ret.val.resize(off_size);
+  ret.idx.resize(off_size);
+  ret.off.resize(end_row - start_row + 1); // off[0] == 0 by ctor
+  T* valp = ret.val.data();
+  I* idxp = ret.idx.data();
+  O* offp = ret.off.data();
+  for(size_t i = 0; i < off_size; i++) {
+    valp[i] = leftvalp[i + start_off];
+    idxp[i] = leftidxp[i + start_off];
+  }
+  for(size_t i = 0; i < end_row - start_row; i++) {
+    offp[i+1] = offp[i] + (leftoffp[start_row + i + 1] -
+                           leftoffp[start_row + i]);
+  }
+
+  return ret;
 }
 
 }
