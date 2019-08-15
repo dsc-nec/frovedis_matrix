@@ -5,6 +5,28 @@
 using namespace frovedis;
 using namespace std;
 
+// here we assume that val/idx/off is less than 2GB!
+template <class T, class I, class O>
+void broadcast_crs_matrix(crs_matrix_local<T,I,O>& crs) {
+  int rank, size;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+  MPI_Bcast(&crs.local_num_row, sizeof(size_t), MPI_CHAR, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&crs.local_num_col, sizeof(size_t), MPI_CHAR, 0, MPI_COMM_WORLD);
+  size_t nnz = crs.val.size();
+  MPI_Bcast(&nnz, sizeof(size_t), MPI_CHAR, 0, MPI_COMM_WORLD);
+  if(rank != 0) {
+    crs.val.resize(nnz);
+    crs.idx.resize(nnz);
+    crs.off.resize(crs.local_num_row+1);
+  }
+  MPI_Bcast(crs.val.data(), nnz*sizeof(T), MPI_CHAR, 0, MPI_COMM_WORLD);
+  MPI_Bcast(crs.idx.data(), nnz*sizeof(I), MPI_CHAR, 0, MPI_COMM_WORLD);
+  MPI_Bcast(crs.off.data(), (crs.local_num_row+1)*sizeof(O), MPI_CHAR, 0,
+            MPI_COMM_WORLD);
+}
+
 int main(int argc, char* argv[]){
   int required = MPI_THREAD_SERIALIZED;
   int provided;
@@ -22,17 +44,16 @@ int main(int argc, char* argv[]){
   int rank, size;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
-  //if(rank == 0) set_loglevel(DEBUG);
-  auto crs = make_crs_matrix_local_loadbinary<float,int>(argv[1]);
-  if(rank == 0) t.show("load: ");
-  crs_matrix_local<float,int> mypart;
-  {
-    auto crss = get_scattered_crs_matrices(crs, size);
-    mypart = crss[rank];
+  crs_matrix_local<float,int> crs;
+  if(rank == 0) {
+    crs = make_crs_matrix_local_loadbinary<float,int>(argv[1]);
   }
+  if(rank == 0) t.show("load: ");
+  broadcast_crs_matrix(crs);
+  auto mypart = separate_crs_matrix_for_spgemm_mpi(crs,crs);
+  if(rank == 0) t.show("broadcast & separate matrix: ");
   int num_merge = atoi(argv[2]);
   int num_split = atoi(argv[3]);
-  if(rank == 0) t.show("separate matrix: ");
   MPI_Barrier(MPI_COMM_WORLD);
   if(rank == 0) t.show("start: ");
   spgemm(mypart, crs, spgemm_type::block_esc, num_merge);
