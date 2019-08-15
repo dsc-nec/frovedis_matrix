@@ -19,7 +19,7 @@ evalspgemm: evalspgemm.o
 	${CXX} ${CXXFLAGS} -o evalspgemm evalspgemm.o ${LIBS}
 
 evalspgemm_mpi: evalspgemm_mpi.cc
-	${MPICXX} ${CXXFLAGS} -o evalspgemm_mpi evalspgemm_mpi.cc -ftrace ${LIBS}
+	${MPICXX} ${CXXFLAGS} -o evalspgemm_mpi evalspgemm_mpi.cc ${LIBS}
 
 clean:
 	rm -fr ${TO_CLEAN} ${TARGETS}
