@@ -756,6 +756,53 @@ get_scattered_crs_matrices(crs_matrix_local<T,I,O>& data,
   return vret;
 }
 
+template <class T, class I, class O>
+crs_matrix_local<T,I,O>
+merge_scattered_crs_matrices(const std::vector<crs_matrix_local<T,I,O>>& vcrs) {
+  crs_matrix_local<T,I,O> ret;
+  size_t vcrssize = vcrs.size();
+  if(vcrssize == 0) return ret;
+  size_t num_col = vcrs[0].local_num_col;
+  for(size_t i = 1; i < vcrssize; i++) {
+    if(vcrs[i].local_num_col != num_col)
+      throw std::runtime_error
+        ("merge_scattered_crs_matrices: local_num_col is different");
+  }
+  size_t num_row = 0;
+  for(size_t i = 0; i < vcrssize; i++) num_row += vcrs[i].local_num_row;
+  size_t total_nnz = 0;
+  for(size_t i = 0; i < vcrssize; i++) total_nnz += vcrs[i].val.size();
+  ret.local_num_col = num_col;
+  ret.local_num_row = num_row;
+  ret.val.resize(total_nnz);
+  ret.idx.resize(total_nnz);
+  ret.off.resize(num_row+1);
+  auto crnt_retval = ret.val.data();
+  auto crnt_retidx = ret.idx.data();
+  auto crnt_retoff = ret.off.data();
+  O to_add = 0;
+  for(size_t i = 0; i < vcrssize; i++) {
+    auto valp = vcrs[i].val.data();
+    auto idxp = vcrs[i].idx.data();
+    auto offp = vcrs[i].off.data();
+    auto nnz = vcrs[i].val.size();
+    for(size_t j = 0; j < nnz; j++) {
+      crnt_retval[j] = valp[j];
+      crnt_retidx[j] = idxp[j];
+    }
+    crnt_retval += nnz;
+    crnt_retidx += nnz;
+    auto src_num_row = vcrs[i].local_num_row;
+    for(size_t j = 0; j < src_num_row; j++) {
+      crnt_retoff[j] = offp[j] + to_add;
+    }
+    to_add += offp[src_num_row];
+    crnt_retoff += src_num_row;
+  }
+  ret.off[num_row] = to_add;
+  return ret;
+}
+
 #if defined(_SX) || defined(__ve__)
 /*
   This version vectorize column dimension of rowmajor matrix
