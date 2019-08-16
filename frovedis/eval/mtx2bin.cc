@@ -23,8 +23,6 @@ int main(int argc, char* argv[]){
   std::getline(ifs,line);
   if(!(line.find("symmetric") == string::npos)) is_symmetric = true;
   if(!(line.find("pattern") == string::npos)) is_pattern = true;
-  if(is_symmetric && is_pattern)
-    throw runtime_error("symmetric & pattern is not supported yet");
   while(std::getline(ifs,line)) {
     if(line[0] == '%') continue;
     else break;
@@ -35,6 +33,12 @@ int main(int argc, char* argv[]){
   while(std::getline(ifs,line)) {
     if(is_pattern) {
       ofs << line << " " << 1 << endl;
+      if(is_symmetric) {
+        istringstream iss2(line);
+        size_t row, col;
+        iss2 >> row >> col;
+        if(row != col) ofs << col << " " << row << " " << 1 << endl;
+      }
     } else {
       ofs << line << endl;
       if(is_symmetric) {
