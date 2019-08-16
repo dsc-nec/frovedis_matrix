@@ -1,6 +1,6 @@
 include ../Makefile.in.x86
 
-TARGETS := evalspmv evalspmm evalspgemm evalspgemm_mpi conv mtx2bin randmatgen
+TARGETS := evalspmv evalspmm evalspgemm evalspgemm_mpi conv mtx2bin randmatgen stat g5002bin
 
 LIBS := -L../core -lfrovedis_core -L../matrix -lfrovedis_matrix
 INCLUDES := -I../.. -I.
@@ -29,6 +29,12 @@ mtx2bin: mtx2bin.o
 
 randmatgen: randmatgen.o
 	${CXX} ${CXXFLAGS} -o randmatgen randmatgen.o ${LIBS}
+
+stat: stat.o
+	${CXX} ${CXXFLAGS} -o stat stat.o ${LIBS}
+
+g5002bin: g5002bin.o
+	${CXX} ${CXXFLAGS} -o g5002bin g5002bin.o ${LIBS}
 
 clean:
 	rm -fr ${TO_CLEAN} ${TARGETS} tmp
