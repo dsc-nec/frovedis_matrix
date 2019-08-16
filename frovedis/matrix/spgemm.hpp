@@ -2225,6 +2225,7 @@ separate_crs_matrix_for_spgemm(crs_matrix_local<T,I,O>& left,
   return vret;
 }
 
+#ifdef MPI_VERSION
 // assume that left and right is broadcasted,
 // returns only my part of left
 template <class T, class I, class O>
@@ -2339,6 +2340,6 @@ separate_crs_matrix_for_spgemm_mpi(crs_matrix_local<T,I,O>& left,
 
   return ret;
 }
-
+#endif
 }
 #endif
